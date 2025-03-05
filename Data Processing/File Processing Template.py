@@ -20,3 +20,7 @@ for index, row in df.iterrows():
         df.at[index, 'Drought ID'] = 'normal operation'
 #if you want to overwrite the new file, keep the path an name the same, otherwise, change the filename. 
 df.to_csv(NEWFILENAME, index=False)
+#Take a look at what it made.
+df = pd.read_csv(NEWFILENAME)
+print(df)
+print("Done")
