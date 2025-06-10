@@ -1,0 +1,36 @@
+# --- Core Web Framework ---
+fastapi>=0.100.0
+uvicorn[standard]>=0.24.0
+
+# --- Templating & Schemas ---
+jinja2>=3.1.2
+pydantic>=2.3.0
+
+# --- Environment / Config ---
+python-dotenv>=1.0.0
+
+# --- Database / SQL Adapter ---
+SQLAlchemy>=2.0.17
+psycopg2-binary>=2.9.6      # or mysqlclient>=2.1.1 if you use MySQL
+
+# --- Data Handling / File Adapter ---
+pandas>=2.0.3
+
+# --- PowerWorld ESA Adapter ---
+esa>=0.1.0                 # adjust to your ESA Python package name/version
+
+# --- Caching / Artifact Storage ---
+redis>=4.5.5
+
+# --- LLM & Retrieval (optional if you integrate later) ---
+transformers>=4.34.0
+accelerate>=0.23.0
+bitsandbytes>=0.40.0
+peft>=0.4.0
+tokenizers>=0.13.3
+sentence-transformers>=2.2.2
+faiss-cpu>=1.7.4           # for embedding-based retrieval
+
+# --- Utilities ---
+python-multipart>=0.0.6    # if you ever handle form/file uploads
+requests>=2.31.0

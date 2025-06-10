@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <title>RAG System - Ask a Question</title>
+    <link rel="stylesheet" href="/static/style.css"/>
+  </head>
+  <body>
+    <h1>Ask a Question</h1>
+    <form id="question-form">
+      <textarea id="question" name="question"
+        rows="4" cols="60"
+        placeholder="Enter your question..."></textarea><br/>
+      <button type="button" onclick="submitQuestion()">Submit</button>
+    </form>
+    <h2>Response:</h2>
+    <pre id="result"></pre>
+
+    <!-- load our external JS -->
+    <script src="/static/app.js"></script>
+  </body>
+</html>
