@@ -33,7 +33,7 @@ http://localhost:8000/
   - **FileAdapter**: reads plain-text files (line ranges → snippets + `.txt` artifact)  
   - **SQLAdapter**: runs parameterized queries via SQLAlchemy (PostgreSQL or SQLite) → snippets + `.csv` artifact  
   - **ESAAdapter**: drives PowerWorld via `esa.saw` COM interface → snippets + `.pwb`, CSV, and diagram artifacts  
-  - **ShellAdapter** (optional): executes whitelisted CLI commands (e.g. `psql`, `grep`, `esa-cli`) → stdout → snippets + `.txt` artifact  
+  - **ShellAdapter**: executes whitelisted CLI commands (e.g. `psql`, `grep`, `esa-cli`) → stdout → snippets + `.txt` artifact  
 
 - **Artifact Storage**  
   - Local `app/exports/` directory for all exported files (`.txt`, `.csv`, `.pwb`, images)  
