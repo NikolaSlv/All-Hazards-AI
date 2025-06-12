@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from app.api import ui, planner
+import uvicorn
 
 app = FastAPI(title="RAG Prototype")
 
@@ -12,7 +13,6 @@ app.include_router(ui.router)
 app.include_router(planner.router)
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
