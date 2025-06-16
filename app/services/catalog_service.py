@@ -1,17 +1,22 @@
 import os
 import re
 import json
-import pandas as pd
+import logging
 from pathlib import Path
 from collections import defaultdict
 
-# ── 1) locate your project root & data dir ────────────────────────────────────
-# this file lives at PROJECT_ROOT/app/services/catalog_service.py
+import pandas as pd
+from tqdm import tqdm
+
+# ── locate your project root & data dir ─────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR     = PROJECT_ROOT / "data"
 CATALOG_FILE = DATA_DIR / "catalog.json"
 
-# ── 2) helper to collapse runs of foo1, foo2, …, fooN → foo:1-N ────────────────
+# ── module‐level logger ────────────────────────────────────────────────────
+logger = logging.getLogger("catalog_service")
+
+# ── helper to collapse runs of foo1, foo2, …, fooN → foo:1-N ────────────────
 def compress_columns(cols: list[str]) -> list[str]:
     groups: dict[str, set[int]] = defaultdict(set)
     others: list[str]          = []
@@ -25,42 +30,38 @@ def compress_columns(cols: list[str]) -> list[str]:
             others.append(c)
 
     result: list[str] = []
-    # keep non-numeric suffix columns first
     result.extend(others)
 
-    # now collapse each numeric group
     for prefix, nums in groups.items():
         sorted_nums = sorted(nums)
         if len(sorted_nums) <= 2:
-            # if just one or two entries, list them explicitly
             for n in sorted_nums:
                 result.append(f"{prefix}:{n}")
         else:
-            # collapse into prefix:1-N using ASCII hyphen
             result.append(f"{prefix}:1-{sorted_nums[-1]}")
 
     return result
 
-# ── 3) build the catalog dict ─────────────────────────────────────────────────
+# ── build the catalog dict ─────────────────────────────────────────────────
 def generate_catalog() -> dict:
+    logger.info("Starting catalog generation from %s", DATA_DIR)
     if not DATA_DIR.is_dir():
+        logger.error("Data directory not found: %s", DATA_DIR)
         raise FileNotFoundError(f"data/ folder not found at {DATA_DIR!s}")
 
     catalog: dict = {"files": []}
+    csv_files = sorted(f for f in os.listdir(DATA_DIR) if f.lower().endswith(".csv"))
 
-    for fname in sorted(os.listdir(DATA_DIR)):
-        if not fname.lower().endswith((".csv", ".txt")):
-            continue
-
+    for fname in tqdm(csv_files, desc="Cataloging files", unit="file"):
         full_path = DATA_DIR / fname
         rel_path  = f"data/{fname}"
 
-        # read only header row to get column names
         try:
-            df    = pd.read_csv(full_path, nrows=0, skiprows=1)
-            cols  = list(df.columns)
-            cols  = compress_columns(cols)
-        except Exception:
+            # read header row (skip one row if you have metadata)
+            df   = pd.read_csv(full_path, nrows=0, skiprows=1)
+            cols = compress_columns(list(df.columns))
+        except Exception as e:
+            logger.warning("Failed to read columns from %s: %s", fname, e)
             cols = []
 
         catalog["files"].append({
@@ -68,18 +69,19 @@ def generate_catalog() -> dict:
             "columns": cols,
         })
 
+    logger.info("Catalog built: %d file(s) found", len(catalog["files"]))
     return catalog
 
-# ── 4) save & load helpers ───────────────────────────────────────────────────
+# ── save & load helpers ────────────────────────────────────────────────────
 def save_catalog(path: Path = CATALOG_FILE) -> None:
     cat = generate_catalog()
     path.write_text(json.dumps(cat, indent=2), encoding="utf-8")
-    print(f"📝 Wrote catalog to {path!s}")
+    logger.info("Wrote catalog to %s", path)
 
 def load_catalog(path: Path = CATALOG_FILE) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
-# ── 5) (optional) human-friendly summary ────────────────────────────────────
+# ── optional human-friendly summary ────────────────────────────────────────
 def render_catalog_summary(cat: dict) -> str:
     lines = ["Available files:"]
     for f in cat.get("files", []):
@@ -87,6 +89,11 @@ def render_catalog_summary(cat: dict) -> str:
         lines.append(f"- {f['path']}: {', '.join(cols)}")
     return "\n".join(lines)
 
-# ── 6) CLI entrypoint ───────────────────────────────────────────────────────
+# ── CLI entrypoint ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # configure a simple console logger if run as a script
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        level=logging.INFO
+    )
     save_catalog()

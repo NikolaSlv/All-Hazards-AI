@@ -1,7 +1,7 @@
 """
 app/services/planner_service.py
 ──────────────────────────────────────────────────────────────────────────
-Meta-Llama-3-70B-Instruct “Planner” for the RAG demo.
+Meta-Llama-3-8B-Instruct “Planner” for the RAG demo.
 
 • Tries full-GPU (fp16) first.
 • If that fails → 4-bit bitsandbytes off-load (Linux/WSL only).
@@ -12,7 +12,12 @@ Exports:  async def plan(question:str) -> dict
 
 from __future__ import annotations
 
-import json, logging, os, re, time, platform
+import json
+import logging
+import os
+import re
+import time
+import platform
 from typing import Any, Dict
 
 import torch
@@ -20,7 +25,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     GenerationConfig,
-    BitsAndBytesConfig,      # will be unused on Windows if bnb wheel absent
+    BitsAndBytesConfig,
     logging as hf_logging,
 )
 
@@ -34,8 +39,8 @@ logger = logging.getLogger("planner_service")
 hf_logging.set_verbosity_info()
 hf_logging.enable_progress_bar()
 
-# ───────────────────────  Model / HF settings  ───────────────────────────
-MODEL_NAME = "meta-llama/Meta-Llama-3-70B-Instruct"
+# ─────────────────── Model / HF settings ─────────────────────────────────
+MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
 CACHE_DIR  = os.getenv("HF_CACHE_DIR", "app/model_cache")
 HF_TOKEN   = os.getenv("HUGGINGFACE_HUB_TOKEN")
 
@@ -44,7 +49,7 @@ HAS_CUDA   = torch.cuda.is_available()
 
 logger.info("CUDA available: %s  |  OS: %s", HAS_CUDA, platform.system())
 
-# 4-bit quant-config (will be used only if bitsandbytes import succeeds)
+# 4-bit quant config
 _BNB_CFG = BitsAndBytesConfig(
     load_in_4bit              = True,
     bnb_4bit_compute_dtype    = torch.float16,
@@ -52,16 +57,15 @@ _BNB_CFG = BitsAndBytesConfig(
     bnb_4bit_quant_type       = "nf4",
 )
 
-# ───────────────────────  Tokeniser  ──────────────────────────────────────
+# ─────────────────────── Tokenizer ───────────────────────────────────────
 tok_t0 = time.time()
 tokenizer = AutoTokenizer.from_pretrained(
     MODEL_NAME, cache_dir=CACHE_DIR, use_fast=True, use_auth_token=HF_TOKEN
 )
 logger.info("Tokenizer loaded (%.1f s)", time.time() - tok_t0)
 
-# ───────────────────────  Model loader  ───────────────────────────────────
+# ──────────────────────── Model loader ────────────────────────────────────
 def _load_model() -> AutoModelForCausalLM:
-    # 1) full fp16 GPU
     if HAS_CUDA:
         try:
             logger.info("Attempting full-precision fp16 on GPU …")
@@ -73,12 +77,11 @@ def _load_model() -> AutoModelForCausalLM:
                 use_auth_token=HF_TOKEN,
             )
         except (RuntimeError, OSError) as exc:
-            logger.warning("Full-GPU load failed (%s).  Falling back.", exc)
+            logger.warning("Full-GPU load failed (%s). Falling back.", exc)
 
-    # 2) 4-bit bitsandbytes (Linux / WSL only)
     if not IS_WINDOWS:
         try:
-            import bitsandbytes as _  # noqa: F401
+            import bitsandbytes  # noqa: F401
             logger.info("Trying 4-bit bitsandbytes off-load …")
             return AutoModelForCausalLM.from_pretrained(
                 MODEL_NAME,
@@ -88,9 +91,8 @@ def _load_model() -> AutoModelForCausalLM:
                 use_auth_token=HF_TOKEN,
             )
         except (ImportError, OSError) as exc:
-            logger.warning("bitsandbytes unavailable (%s).  Falling back to CPU.", exc)
+            logger.warning("bitsandbytes unavailable (%s). Falling back to CPU.", exc)
 
-    # 3) plain CPU
     logger.info("Loading on CPU … this may be slow.")
     return AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
@@ -104,16 +106,14 @@ logger.info("Loading model weights …")
 t0 = time.time()
 model = _load_model()
 logger.info("Model ready in %.1f s", time.time() - t0)
-for comp, dev in getattr(model, "hf_device_map", {}).items():
-    logger.info("• %-28s → %s", comp, dev)
 
-# ─────────────────────  Prompt template  ─────────────────────────────────
+# ───────────────────── Prompt template ────────────────────────────────────
 PROMPT_BODY = """
-You are a *document-retrieval* assistant.  Allowed targets are **CSV/TXT**
-files inside the project’s **data/** folder (listed above).
+You are a *document-retrieval* assistant.  Allowed targets are **CSV** files inside the project's **data/** folder (listed above).
 
-Return *EXACTLY ONE* JSON object whose ONLY key is "source_queries".
-That key contains a list of 1-3 file queries.  Schema (braces doubled):
+**Important:** Always begin your output with the keyword `Response:` on its own line, then immediately follow with the JSON block.
+
+Return *EXACTLY ONE* JSON object whose ONLY key is "source_queries". Schema (braces doubled):
 
 {{
   "source_queries": [
@@ -131,29 +131,31 @@ No extra keys, no prose — just the JSON block.
 User question: "{question}"
 """.strip()
 
+# Regex to grab the first {...} block (even if nested braces)
 _JSON_RE = re.compile(r"\{(?:[^{}]|\{[^{}]*\})*\}", re.DOTALL)
+
 def _first_json(text: str) -> str:
     m = _JSON_RE.search(text)
     if not m:
-        raise ValueError("No JSON found")
+        raise ValueError("No JSON found in:\n" + text)
     return m.group(0)
 
-# ─────────────────────  Planner entrypoint  ──────────────────────────────
+# ───────────────────── Planner entrypoint ─────────────────────────────────
 async def plan(question: str) -> Dict[str, Any]:
     logger.info("Planning: %s", question)
 
-    # catalog summary
+    # 1) Build prompt
     try:
         summary = render_catalog_summary(load_catalog())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Catalog load failed: %s", exc)
         summary = "WARNING: catalog unavailable."
 
     prompt = f"{summary}\n\n{PROMPT_BODY.format(question=question)}"
     logger.debug("── Prompt to LLM ──\n%s\n── end prompt ──", prompt)
 
+    # 2) Generate
     inp = tokenizer(prompt, return_tensors="pt").to(model.device)
-
     t_gen = time.time()
     out_ids = model.generate(
         **inp,
@@ -168,19 +170,43 @@ async def plan(question: str) -> Dict[str, Any]:
     )
     logger.info("Generation %.2f s", time.time() - t_gen)
 
-    raw = tokenizer.decode(out_ids[0], skip_special_tokens=True).strip()
-    logger.debug("LLM raw output:\n%s", raw)
+    # 3) Decode full output
+    raw_full = tokenizer.decode(out_ids[0], skip_special_tokens=True).strip()
+    logger.debug("LLM raw full output:\n%s", raw_full)
 
+    # 4) Strip everything up through the first literal sequence:
+    #    Response:  {  "source_queries":  [    {
+    #    allowing any whitespace around punctuation & newlines
+    marker_pattern = (
+        r"Response\s*:\s*"
+        r"\{\s*\"source_queries\"\s*:\s*\[\s*\{"
+    )
+    marker_re = re.compile(marker_pattern, re.IGNORECASE | re.DOTALL)
+
+    m = marker_re.search(raw_full)
+    if m:
+        # start at the '{' of the JSON block (group 0 includes it)
+        start = raw_full.find("{", m.start())
+        raw_after = raw_full[start:]
+        logger.debug("After slicing at custom marker:\n%s", raw_after)
+    else:
+        raw_after = raw_full
+
+    # 5) Extract only the first JSON block
     try:
-        plan_obj: Dict[str, Any] = json.loads(_first_json(raw))
-    except Exception as err:
-        logger.error("JSON parse failure – raw output above.")
-        raise RuntimeError(f"Planner returned malformed JSON: {err}") from err
+        json_block = _first_json(raw_after)
+        logger.debug("Extracted JSON block:\n%s", json_block)
+    except ValueError as err:
+        logger.error("JSON extraction failed: %s", err)
+        raise RuntimeError("Planner returned malformed or missing JSON") from err
 
-    # auto-wrap naked dict
+    # 6) Parse and normalize
+    plan_obj = json.loads(json_block)
     if "source_queries" not in plan_obj and plan_obj.get("source_type") == "file":
         plan_obj = {"source_queries": [plan_obj]}
 
-    logger.info("Planner produced %d file-query(ies)",
-                len(plan_obj.get("source_queries", [])))
+    logger.info(
+        "Planner produced %d file-query(ies)",
+        len(plan_obj.get("source_queries", [])),
+    )
     return plan_obj
