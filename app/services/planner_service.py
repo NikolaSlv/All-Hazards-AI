@@ -109,7 +109,7 @@ logger.info("Model ready in %.1f s", time.time() - t0)
 
 # ───────────────────── Prompt template ────────────────────────────────────
 PROMPT_BODY = """
-You are a *document-retrieval* assistant.  Allowed targets are **CSV** files inside the project's **data/** folder (listed above).
+You are a *document-retrieval* assistant. Allowed targets are **CSV** files inside the project's **data/** folder (listed above).
 
 **Important:** Always begin your output with the keyword `Response:` on its own line, then immediately follow with the JSON block.
 
