@@ -2,6 +2,7 @@
 __pycache__/
 .env
 model_cache/
-data/
 app/user_data/*
 !app/user_data/.gitkeep
+data/*
+!data/.gitkeep

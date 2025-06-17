@@ -3,11 +3,9 @@ app/services/planner_service.py
 ──────────────────────────────────────────────────────────────────────────
 Meta-Llama-3-8B-Instruct “Planner” for the RAG demo.
 
-• Tries full-GPU (fp16) first.
-• If that fails → 4-bit bitsandbytes off-load (Linux/WSL only).
-• If that fails → plain CPU.
-
-Exports:  async def plan(question:str) -> dict
+• Reuses the model & tokenizer from llm_loader so that
+  loading happens only once at startup.
+• Exports: async def plan(question:str) -> dict
 """
 
 from __future__ import annotations
@@ -17,95 +15,17 @@ import logging
 import os
 import re
 import time
-import platform
 from typing import Any, Dict
 
-import torch
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    GenerationConfig,
-    BitsAndBytesConfig,
-    logging as hf_logging,
-)
+from transformers import GenerationConfig
 
 from app.services.catalog_service import load_catalog, render_catalog_summary
+from app.services.llm_loader import model, tokenizer
 
-# ─────────────────────────  Logging  ──────────────────────────────────────
+# ─────────────────────────── Logging ──────────────────────────────────────
 LOGLEVEL = getattr(logging, os.getenv("PLANNER_LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=LOGLEVEL)
 logger = logging.getLogger("planner_service")
-
-hf_logging.set_verbosity_info()
-hf_logging.enable_progress_bar()
-
-# ─────────────────── Model / HF settings ─────────────────────────────────
-MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
-CACHE_DIR  = os.getenv("HF_CACHE_DIR", "app/model_cache")
-HF_TOKEN   = os.getenv("HUGGINGFACE_HUB_TOKEN")
-
-IS_WINDOWS = platform.system() == "Windows"
-HAS_CUDA   = torch.cuda.is_available()
-
-logger.info("CUDA available: %s  |  OS: %s", HAS_CUDA, platform.system())
-
-# 4-bit quant config
-_BNB_CFG = BitsAndBytesConfig(
-    load_in_4bit              = True,
-    bnb_4bit_compute_dtype    = torch.float16,
-    bnb_4bit_use_double_quant = True,
-    bnb_4bit_quant_type       = "nf4",
-)
-
-# ─────────────────────── Tokenizer ───────────────────────────────────────
-tok_t0 = time.time()
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_NAME, cache_dir=CACHE_DIR, use_fast=True, use_auth_token=HF_TOKEN
-)
-logger.info("Tokenizer loaded (%.1f s)", time.time() - tok_t0)
-
-# ──────────────────────── Model loader ────────────────────────────────────
-def _load_model() -> AutoModelForCausalLM:
-    if HAS_CUDA:
-        try:
-            logger.info("Attempting full-precision fp16 on GPU …")
-            return AutoModelForCausalLM.from_pretrained(
-                MODEL_NAME,
-                cache_dir=CACHE_DIR,
-                torch_dtype=torch.float16,
-                device_map="auto",
-                use_auth_token=HF_TOKEN,
-            )
-        except (RuntimeError, OSError) as exc:
-            logger.warning("Full-GPU load failed (%s). Falling back.", exc)
-
-    if not IS_WINDOWS:
-        try:
-            import bitsandbytes  # noqa: F401
-            logger.info("Trying 4-bit bitsandbytes off-load …")
-            return AutoModelForCausalLM.from_pretrained(
-                MODEL_NAME,
-                cache_dir=CACHE_DIR,
-                device_map="auto",
-                quantization_config=_BNB_CFG,
-                use_auth_token=HF_TOKEN,
-            )
-        except (ImportError, OSError) as exc:
-            logger.warning("bitsandbytes unavailable (%s). Falling back to CPU.", exc)
-
-    logger.info("Loading on CPU … this may be slow.")
-    return AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        cache_dir=CACHE_DIR,
-        device_map={"": "cpu"},
-        torch_dtype=torch.bfloat16,
-        use_auth_token=HF_TOKEN,
-    )
-
-logger.info("Loading model weights …")
-t0 = time.time()
-model = _load_model()
-logger.info("Model ready in %.1f s", time.time() - t0)
 
 # ───────────────────── Prompt template ────────────────────────────────────
 PROMPT_BODY = """
@@ -142,7 +62,7 @@ def _first_json(text: str) -> str:
 async def plan(question: str) -> Dict[str, Any]:
     logger.info("Planning: %s", question)
 
-    # 1) Build prompt
+    # 1) Build prompt (with catalog summary)
     try:
         summary = render_catalog_summary(load_catalog())
     except Exception as exc:
@@ -172,9 +92,7 @@ async def plan(question: str) -> Dict[str, Any]:
     raw_full = tokenizer.decode(out_ids[0], skip_special_tokens=True).strip()
     logger.debug("LLM raw full output:\n%s", raw_full)
 
-    # 4) Strip everything up through the first literal sequence:
-    #    Response:  {  "source_queries":  [    {
-    #    allowing any whitespace around punctuation & newlines
+    # 4) Strip everything through the first Response→JSON marker:
     marker_pattern = (
         r"Response\s*:\s*"
         r"\{\s*\"source_queries\"\s*:\s*\[\s*\{"
@@ -183,7 +101,7 @@ async def plan(question: str) -> Dict[str, Any]:
 
     m = marker_re.search(raw_full)
     if m:
-        # start at the '{' of the JSON block (group 0 includes it)
+        # find the first '{' after the match and slice there
         start = raw_full.find("{", m.start())
         raw_after = raw_full[start:]
         logger.debug("After slicing at custom marker:\n%s", raw_after)
@@ -198,7 +116,7 @@ async def plan(question: str) -> Dict[str, Any]:
         logger.error("JSON extraction failed: %s", err)
         raise RuntimeError("Planner returned malformed or missing JSON") from err
 
-    # 6) Parse and normalize
+    # 6) Parse & normalize
     plan_obj = json.loads(json_block)
     if "source_queries" not in plan_obj and plan_obj.get("source_type") == "file":
         plan_obj = {"source_queries": [plan_obj]}
