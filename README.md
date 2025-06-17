@@ -1,6 +1,6 @@
 # Retrieval-Augmented Generation (RAG) Prototype
 
-A self-contained, research-grade prototype of a Retrieval-Augmented Generation system.
+A self-contained, research-grade prototype of a Retrieval-Augmented Generation system built with FastAPI and Hugging Face Transformers.
 
 ---
 
@@ -11,13 +11,13 @@ A self-contained, research-grade prototype of a Retrieval-Augmented Generation s
 git clone <your-repo-url>
 cd All-Hazards-AI
 
-# Full install (creates venv & installs deps)
+# Full install (creates virtualenv & installs dependencies)
 ./start.sh
 
 # Or quick dev (assumes venv & deps already present)
 ./dev.sh
 
-# Then open in your browser:
+# Open the UI in your browser:
 http://localhost:8000/
 ```
 
@@ -28,44 +28,60 @@ http://localhost:8000/
 - **Language & Framework**  
   - Python 3.10+  
   - [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn (ASGI server)  
-  - Jinja2 templates & static files for UI  
+  - Jinja2 (templates) & plain JavaScript (static files) for UI  
   - Pydantic for request/response schemas  
 
 - **LLM Integration**  
-  - 🤖 **`llm_loader.py`**: loads Meta-Llama & tokenizer at startup (fp16 GPU → 4-bit BnB → CPU)  
-  - **`planner_service.py`**: wraps the LLM to produce `source_queries` JSON  
+  - **`llm_loader.py`**: loads Meta‑Llama model & tokenizer on import (tries fp16 GPU → 4‑bit BnB → CPU)  
+  - **`planner_service.py`**: wraps the LLM to produce a JSON plan of data sources  
 
-- **Python-Execution**  
-  - **`/exec_shell` endpoint** (`shell.py` + `shell_service.py`): upload a `.py` file, save to `app/uploads/`, run it as a subprocess, and return its combined stdout+stderr  
+- **Catalog Service**  
+  - **`catalog_service.py`**: scans `data/` on startup, builds `catalog.json` of available CSVs  
 
-- **Artifact Storage**  
-  - Local `app/exports/` directory for all exported files (`.txt`, `.csv`, `.pwb`, images)  
-  - Served as static files at `http://localhost:8000/exports/...` via FastAPI’s `StaticFiles`  
+- **Python Execution**  
+  - **`/exec_shell`** endpoint (`exec_shell.py` + `shell_service.py`):  
+    1. Upload a `.py` file via multipart/form-data  
+    2. Run it immediately in a subprocess (`python your_script.py`)  
+    3. Return combined stdout+stderr in JSON  
 
-- **Caching**  
-  - In-process LRU cache (`functools.lru_cache`) for snippet results  
-
-- **Future Enhancements**  
-  - PEFT (LoRA) + BitsAndBytes quantization  
-  - Tokenizers/SentenceTransformers + FAISS-CPU for vector retrieval  
-  - Answer‐generation endpoint (`/generate`) with fine-tuned LLM  
+- **Utilities & Libraries**  
+  - `python-dotenv` for `.env` configuration  
+  - `pandas` & `tqdm` for CSV introspection and progress reporting  
+  - `torch`, `bitsandbytes`, `transformers` for LLM loading  
+  - `asyncio` for non-blocking subprocess execution  
 
 ---
 
 ## 📐 Architecture & Pipeline
 
-1. **Planner LLM**  
-   - **Endpoint**: `POST /planner` ← `{ "question": "…" }`  
-   - **Output**: `{ "source_queries": [ … ] }`  
+1. **Startup**  
+   - `catalog_service` runs on app startup → regenerates `data/catalog.json`.  
+   - `llm_loader` imports → loads model & tokenizer once.  
 
-2. **Python-Execution**  
-   - **Endpoint**: `POST /exec_shell` ← multipart/form-data with a `.py` file  
-   - **Action**: saves to `app/uploads/` then calls `shell_service.run_shell()` (spawns `python file.py`)  
-   - **Response**: `{ "output": "<stdout+stderr>" }`  
+2. **Plan**  
+   - **Endpoint**: `POST /planner`  
+   - **Request**: `{ "question": "…" }`  
+   - **Response**:  
+     ```json
+     {
+       "source_queries": [
+         { 
+           "source_type": "<type of source, e.g. 'csv'>",
+           "file_path": "<relative/path/to/file>"
+         }
+       ]
+     }
+     ```
 
-3. **Answer Generation** (planned)  
-   - **Endpoint**: `POST /generate` ← `{ question, snippets }`  
-   - Calls fine-tuned LLM → returns `{ answer, sources, artifacts, model_metrics }`  
+3. **Execute Python**  
+   - **Endpoint**: `POST /exec_shell` (multipart/form-data)  
+   - **Upload**: `.py` file  
+   - **Action**: handled in-memory / temp file; run via `shell_service.run_shell()`  
+   - **Response**: `{ "output": "<stdout+stderr>" }`
+
+4. **Answer Generation** (planned)  
+   - **Endpoint**: `POST /generate`  
+   - Combines question + retrieved snippets → fine-tuned LLM → returns answer & sources  
 
 ---
 
@@ -75,30 +91,37 @@ http://localhost:8000/
 All-Hazards-AI/
 ├── app/
 │   ├── __init__.py
-│   ├── main.py                   # FastAPI entrypoint (with exec_shell & planner routers)
+│   ├── main.py                   # FastAPI entrypoint
 │   ├── api/
 │   │   ├── __init__.py
-│   │   ├── ui.py                 # Jinja2 template route
-│   │   ├── planner.py            # /planner endpoint
-│   │   └── shell.py              # /exec_shell endpoint
+│   │   ├── ui.py                 # Jinja2 template route (GET /)
+│   │   ├── planner.py            # POST /planner
+│   │   └── exec_shell.py         # POST /exec_shell
 │   ├── schemas/
 │   │   ├── __init__.py
 │   │   └── question.py           # Pydantic models
 │   ├── services/
 │   │   ├── __init__.py
-│   │   ├── llm_loader.py         # loads model & tokenizer at import
-│   │   ├── planner_service.py    # planner logic (uses llm_loader)
-│   │   └── shell_service.py      # run_shell() → executes Python subprocess
-│   ├── exports/                  # local artifact store (static-served)
-│   ├── uploads/                  # saved .py files for exec_shell
-│   ├── templates/
-│   │   └── index.html
-│   └── static/
-│       ├── app.js                # file-upload + exec_shell handler
-│       └── style.css
+│   │   ├── catalog_service.py    # scans data/ → catalog.json
+│   │   ├── llm_loader.py         # loads model/tokenizer once
+│   │   ├── planner_service.py    # plan(question) → JSON queries
+│   │   └── shell_service.py      # run_shell(path) → subprocess output
+│   ├── static/
+│   │   ├── app.js                # file‑upload + exec_shell handler
+│   │   └── style.css
+│   └── templates/
+│       └── index.html
+├── app/user_data/                # folder kept but contents ignored via .gitignore
+│   └── .gitkeep
+├── data/
+│   ├── .gitkeep
+│   ├── catalog.json              # regenerated on startup
+│   ├── NorthAmerica2023_01.csv
+│   ├── NorthAmerica2023_02.csv
+│   └── NorthAmerica2023_03.csv
 ├── tests/                        # unit & integration tests
-├── .gitignore
 ├── .env                          # environment overrides (optional)
+├── .gitignore
 ├── requirements.txt
 ├── start.sh                      # full setup & run
 ├── dev.sh                        # quick dev launch
@@ -117,7 +140,7 @@ app/user_data/*
 !app/user_data/.gitignore
 ```
 
-Then inside `app/user_data/.gitignore`:
+Then in `app/user_data/.gitignore`:
 
 ```gitignore
 *
