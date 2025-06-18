@@ -9,12 +9,12 @@ import pandas as pd
 from tqdm import tqdm
 
 # ── locate your project root & data dir ─────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR     = PROJECT_ROOT / "data"
 CATALOG_FILE = DATA_DIR / "catalog.json"
 
 # ── module‐level logger ────────────────────────────────────────────────────
-logger = logging.getLogger("catalog_service")
+logger = logging.getLogger("csv_catalog_service")
 
 # ── helper to collapse runs of foo1, foo2, …, fooN → foo:1-N ────────────────
 def compress_columns(cols: list[str]) -> list[str]:
@@ -42,9 +42,9 @@ def compress_columns(cols: list[str]) -> list[str]:
 
     return result
 
-# ── build the catalog dict ─────────────────────────────────────────────────
-def generate_catalog() -> dict:
-    logger.info("Starting catalog generation from %s", DATA_DIR)
+# ── build the CSV catalog dict ──────────────────────────────────────────────
+def generate_csv_catalog() -> dict:
+    logger.info("Starting CSV catalog generation from %s", DATA_DIR)
     if not DATA_DIR.is_dir():
         logger.error("Data directory not found: %s", DATA_DIR)
         raise FileNotFoundError(f"data/ folder not found at {DATA_DIR!s}")
@@ -52,7 +52,7 @@ def generate_catalog() -> dict:
     catalog: dict = {"files": []}
     csv_files = sorted(f for f in os.listdir(DATA_DIR) if f.lower().endswith(".csv"))
 
-    for fname in tqdm(csv_files, desc="Cataloging files", unit="file"):
+    for fname in tqdm(csv_files, desc="Cataloging CSV files", unit="file"):
         full_path = DATA_DIR / fname
         rel_path  = f"data/{fname}"
 
@@ -69,21 +69,21 @@ def generate_catalog() -> dict:
             "columns": cols,
         })
 
-    logger.info("Catalog built: %d file(s) found", len(catalog["files"]))
+    logger.info("CSV catalog built: %d file(s) found", len(catalog["files"]))
     return catalog
 
-# ── save & load helpers ────────────────────────────────────────────────────
-def save_catalog(path: Path = CATALOG_FILE) -> None:
-    cat = generate_catalog()
+# ── save & load CSV catalog ────────────────────────────────────────────────
+def save_csv_catalog(path: Path = CATALOG_FILE) -> None:
+    cat = generate_csv_catalog()
     path.write_text(json.dumps(cat, indent=2), encoding="utf-8")
-    logger.info("Wrote catalog to %s", path)
+    logger.info("Wrote CSV catalog to %s", path)
 
-def load_catalog(path: Path = CATALOG_FILE) -> dict:
+def load_csv_catalog(path: Path = CATALOG_FILE) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
-# ── optional human-friendly summary ────────────────────────────────────────
-def render_catalog_summary(cat: dict) -> str:
-    lines = ["Available files:"]
+# ── optional human-friendly CSV summary ────────────────────────────────────
+def render_csv_catalog_summary(cat: dict) -> str:
+    lines = ["Available CSV files:"]
     for f in cat.get("files", []):
         cols = f.get("columns", [])
         lines.append(f"- {f['path']}: {', '.join(cols)}")
@@ -96,4 +96,4 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         level=logging.INFO
     )
-    save_catalog()
+    save_csv_catalog()

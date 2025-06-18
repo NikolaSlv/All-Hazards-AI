@@ -19,7 +19,7 @@ from typing import Any, Dict
 
 from transformers import GenerationConfig
 
-from app.services.catalog_service import load_catalog, render_catalog_summary
+from app.services.catalog_generation.csv_cat import load_csv_catalog, render_csv_catalog_summary
 from app.services.llm_loader import model, tokenizer
 
 # ─────────────────────────── Logging ──────────────────────────────────────
@@ -64,7 +64,7 @@ async def plan(question: str) -> Dict[str, Any]:
 
     # 1) Build prompt (with catalog summary)
     try:
-        summary = render_catalog_summary(load_catalog())
+        summary = render_csv_catalog_summary(load_csv_catalog())
     except Exception as exc:
         logger.warning("Catalog load failed: %s", exc)
         summary = "WARNING: catalog unavailable."
@@ -125,4 +125,8 @@ async def plan(question: str) -> Dict[str, Any]:
         "Planner produced %d file-query(ies)",
         len(plan_obj.get("source_queries", [])),
     )
+
+    # ── Debug: output the plan object to console ───────────────────────────
+    logger.debug("Final plan_obj: %s", plan_obj)
+
     return plan_obj

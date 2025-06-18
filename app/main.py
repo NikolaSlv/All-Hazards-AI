@@ -1,15 +1,16 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from app.api import ui, planner
-from app.services.catalog_service import save_catalog
 from contextlib import asynccontextmanager
 import uvicorn
+
+from app.api import ui, planner
+from app.services.catalog_generation.csv_cat import save_csv_catalog
 
 # ────────────────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # run once, before the first request
-    save_catalog()
+    # Run once, before the first request, to build the CSV catalog
+    save_csv_catalog()
     yield
     # (could add shutdown logic here if needed)
 
