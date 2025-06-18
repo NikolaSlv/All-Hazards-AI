@@ -39,7 +39,7 @@ Return *EXACTLY ONE* JSON object whose ONLY key is "source_queries". Schema (bra
   "source_queries": [
     {{
       "source_type": "<type of source, e.g. 'csv'>",
-      "file_path": "<relative/path/to/file>"
+      "file_path": "<path/to/file>"
     }}
   ]
 }}
