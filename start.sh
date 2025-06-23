@@ -13,35 +13,45 @@ if [[ ! -d "$VENV_DIR" ]]; then
   python -m venv "$VENV_DIR"
 fi
 
-# ── 2) Activate it (Windows or POSIX layout) ────────────────────────────────
+# ── 2) Activate it ───────────────────────────────────────────────────────────
 if [[ -f "$VENV_DIR/Scripts/activate" ]]; then          # Windows
-  # shellcheck disable=SC1090
   source "$VENV_DIR/Scripts/activate"
 elif [[ -f "$VENV_DIR/bin/activate" ]]; then             # Linux/macOS/WSL
-  # shellcheck disable=SC1090
   source "$VENV_DIR/bin/activate"
 else
   echo "Could not find activate script in $VENV_DIR" >&2
   exit 1
 fi
 
-# ── 3) Upgrade build tooling & install deps (skip pip cache) ────────────────
+# ── 3) Upgrade pip & install deps ───────────────────────────────────────────
 echo "Upgrading pip & wheel …"
 python -m pip install --upgrade pip wheel --no-cache-dir
-
-echo "Installing requirements.txt (no cache) …"
+echo "Installing requirements.txt …"
 pip install --no-cache-dir -r requirements.txt
 
 # ── 4) Load .env if present ─────────────────────────────────────────────────
 if [[ -f ".env" ]]; then
   echo "Loading .env …"
-  # shellcheck disable=SC2046
-  export $(grep -E -v '^\s*#' .env | xargs)
+  set -a
+  source .env
+  set +a
 fi
 
-# ── 5) Launch the dev server ────────────────────────────────────────────────
-echo "🚀 Starting uvicorn on http://localhost:8000/ …"
+# ── 5) Prompt for CSV catalog regeneration ───────────────────────────────────
+read -p "Run CSV catalog generation? (Y/N): " ans
+ans="${ans^^}"
+if [[ "$ans" == "Y" ]]; then
+  echo "🔄 Regenerating CSV catalog…"
+  python - << 'PYCODE'
+from app.services.catalog_generation.csv_cat import save_csv_catalog
+save_csv_catalog()
+PYCODE
+else
+  echo "⏭️  Skipping catalog generation"
+fi
+
+# ── 6) Launch server (no auto-reload) ────────────────────────────────────────
+echo "🚀 Starting Uvicorn on http://localhost:8000/ (no reload) …"
 uvicorn app.main:app \
   --host 0.0.0.0 \
-  --port 8000 \
-  --reload
+  --port 8000

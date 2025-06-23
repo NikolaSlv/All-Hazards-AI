@@ -38,3 +38,36 @@
   ws.onopen  = () => console.log('WS connected');
   ws.onerror = e => console.error('WS error', e);
 })();
+
+// ── File‐upload logic ──
+(() => {
+  const fileInput = document.getElementById('file-input');
+  const submitBtn = document.getElementById('file-submit');
+  const resultPre = document.getElementById('file-result');
+
+  submitBtn.onclick = async () => {
+    const files = fileInput.files;
+    if (!files || files.length === 0) {
+      return alert('Please select a .py file');
+    }
+
+    const form = new FormData();
+    form.append('file', files[0]);
+
+    resultPre.textContent = 'Uploading & running…';
+    try {
+      const resp = await fetch('/exec_shell', {
+        method: 'POST',
+        body: form
+      });
+      if (!resp.ok) {
+        const err = await resp.text();
+        throw new Error(err);
+      }
+      const out = await resp.text();
+      resultPre.textContent = out;
+    } catch (e) {
+      resultPre.textContent = `Error: ${e.message}`;
+    }
+  };
+})();
