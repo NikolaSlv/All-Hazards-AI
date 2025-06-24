@@ -1,45 +1,89 @@
-from __future__ import annotations
-import asyncio, threading, logging
-from typing import List, Dict
+"""
+app/services/generation_service.py
+────────────────────────────────────────────────────────────────────────
+Streams answer text token-by-token from the LLM.
 
-from transformers import GenerationConfig, TextIteratorStreamer
+• Uses TextIteratorStreamer with timeout=None  → blocks until each token
+  is available (no _queue.Empty on slow hardware).
+• FlushEachToken stopping-criteria forces the streamer to emit immediately
+  after every generation step.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+from typing import Callable, Dict, List, Any
+
+from transformers import (
+    GenerationConfig,
+    TextIteratorStreamer,
+    StoppingCriteria,
+    StoppingCriteriaList,
+)
 
 from app.adapters.csv_adapter import format_csv_for_prompt
+from app.adapters.shell_adapter import format_shell_for_prompt
 from app.services.llm_loader import model, tokenizer
 
 logger = logging.getLogger("generation_service")
-ADAPTERS = {"csv": format_csv_for_prompt}
 
+# ─────────────────────────  Source-type → formatter  ──────────────────────
+ADAPTERS: Dict[str, Callable[..., Any]] = {
+    "csv":   format_csv_for_prompt,   # synchronous
+    "shell": format_shell_for_prompt, # async
+}
 
-def _build_prompt(question: str, qs: List[Dict[str, str]]) -> str:
-    parts = [question, ""]
-    for q in qs:
+# ───────────────────────────  Prompt builder  ─────────────────────────────
+async def _build_prompt(question: str, queries: List[Dict[str, str]]) -> str:
+    parts: List[str] = [question, ""]
+    for q in queries:
         fmt = ADAPTERS.get(q.get("source_type"))
-        if fmt:
-            parts += [fmt(q), ""]
+        if not fmt:
+            continue
+        snippet = (
+            await fmt(q) if asyncio.iscoroutinefunction(fmt) else fmt(q)
+        )
+        parts.extend([snippet, ""])
     return "\n".join(parts)
 
+# ───────────────────  Flush every token immediately  ──────────────────────
+class FlushEachToken(StoppingCriteria):
+    """Called after every decode step → streamer flushes each token."""
+    def __call__(self, *_, **__) -> bool:  # noqa: D401
+        return False  # never stop early
 
-async def generate_answer_stream(question, source_queries):
-    prompt = _build_prompt(question, source_queries)
+# ──────────────────────────  Public generator  ────────────────────────────
+async def generate_answer_stream(
+    question: str,
+    source_queries: List[Dict[str, str]],
+):
+    """
+    Async-generator that yields text chunks as soon as the model produces
+    them.  Intended for WebSocket streaming.
+    """
+    prompt = await _build_prompt(question, source_queries)
+    logger.debug("Full generation prompt:\n%s", prompt)
 
-    # log the full prompt
-    logger.info("Full generation prompt:\n%s", prompt)
-
-    # create a streamer that will buffer tokens as they arrive
+    # timeout=None  → block until queue has an item (no _queue.Empty)
     streamer = TextIteratorStreamer(
         tokenizer,
         skip_prompt=True,
         skip_special_tokens=True,
         decode_kwargs={"skip_special_tokens": True},
+        timeout=None,
     )
 
-    # fire off the actual generation in the background
+    gen_inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+    # run generation in a background thread so we can iterate over streamer
     threading.Thread(
         target=model.generate,
         kwargs=dict(
-            **tokenizer(prompt, return_tensors="pt").to(model.device),
+            **gen_inputs,
             streamer=streamer,
+            stopping_criteria=StoppingCriteriaList([FlushEachToken()]),
             generation_config=GenerationConfig(
                 max_new_tokens=256,
                 do_sample=True,
@@ -52,6 +96,7 @@ async def generate_answer_stream(question, source_queries):
         daemon=True,
     ).start()
 
-    # now yield each token (or small chunk) as soon as it arrives
+    # Yield every decoded token / small chunk as soon as it arrives
     for chunk in streamer:
+        logger.debug("Streaming token: %s", chunk)
         yield chunk

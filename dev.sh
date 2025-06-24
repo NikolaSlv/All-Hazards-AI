@@ -31,17 +31,31 @@ if [[ -f ".env" ]]; then
   set +a
 fi
 
-# ── 5) Prompt for CSV catalog regeneration ───────────────────────────────────
-read -p "Run CSV catalog generation? (Y/N): " ans
-ans="${ans^^}"  # uppercase
-if [[ "$ans" == "Y" ]]; then
-  echo "🔄 Regenerating CSV catalog…"
+# ── 5) Prompt for catalog regeneration ───────────────────────────────────────
+#  CSV
+read -p "Regenerate CSV catalog? (Y/N): " ans_csv
+ans_csv="${ans_csv^^}"
+if [[ "$ans_csv" == "Y" ]]; then
+  echo "Regenerating CSV catalog…"
   python - << 'PYCODE'
 from app.services.catalog_generation.csv_cat import save_csv_catalog
 save_csv_catalog()
 PYCODE
 else
-  echo "⏭️  Skipping catalog generation"
+  echo "Skipping CSV catalog"
+fi
+
+#  Script
+read -p "Regenerate script catalog? (Y/N): " ans_script
+ans_script="${ans_script^^}"
+if [[ "$ans_script" == "Y" ]]; then
+  echo "Regenerating script catalog…"
+  python - << 'PYCODE'
+from app.services.catalog_generation.script_cat import save_script_catalog
+save_script_catalog()
+PYCODE
+else
+  echo "Skipping script catalog"
 fi
 
 # ── 6) Launch server (no auto-reload) ────────────────────────────────────────
