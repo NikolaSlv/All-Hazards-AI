@@ -1,3 +1,8 @@
+# ── LLM / logging ─────────────────────────────────────────
 HUGGINGFACE_HUB_TOKEN=hf_xxxYOUR_TOKEN_HERExxx
 PLANNER_LOG_LEVEL=DEBUG
 MODEL_SERVER_URL=localhost:50051
+
+# ── CSV retrieval limits (used by csv_adapter.py) ─────────
+MAX_CSV_RETR_ROWS=10
+MAX_CSV_RETR_COLS=10
