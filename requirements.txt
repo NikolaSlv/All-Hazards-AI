@@ -27,7 +27,11 @@ tokenizers>=0.15.2
 sentence-transformers>=2.2.2
 faiss-cpu>=1.7.4
 sentencepiece>=0.1.99
-protobuf<4.0.0
+protobuf>=6.30.0,<7.0
+
+# ---------- gRPC (LLM micro-service) ---------------------------------------
+grpcio>=1.64.0          # runtime library
+grpcio-tools>=1.73.0    # for `protoc --python_out=/ --grpc_python_out=/`
 
 # ---------- Utilities ------------------------------------------------------
 python-multipart>=0.0.6

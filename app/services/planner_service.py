@@ -1,13 +1,17 @@
+#!/usr/bin/env python
 """
 app/services/planner_service.py
-──────────────────────────────────────────────────────────────────────────
-Meta-Llama-3-8B-Instruct “Planner” for the RAG demo.
+────────────────────────────────────────────────────────────────────────
+LLM-driven *Planner* that decides which data (CSV or shell) to retrieve.
 
-• Reuses the model & tokenizer from llm_loader so that
-  loading happens only once at startup.
-• Exports: async def plan(question:str) -> dict
+✓ Talks to the external gRPC model-server (see start_llm.sh)
+✓ FastAPI layer stays light-weight and hot-reloadable
+
+Public API
+──────────
+    async def plan(question: str) -> dict
+        → {"source_queries": [ … ]}
 """
-
 from __future__ import annotations
 
 import json
@@ -15,9 +19,14 @@ import logging
 import os
 import re
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List
 
+import grpc
 from transformers import GenerationConfig
+
+# gRPC stubs (generated at repo root by start.sh)
+import model_pb2
+import model_pb2_grpc
 
 from app.services.catalog_generation.csv_cat import (
     load_csv_catalog,
@@ -27,9 +36,8 @@ from app.services.catalog_generation.script_cat import (
     load_script_catalog,
     render_script_catalog_summary,
 )
-from app.services.llm_loader import model, tokenizer
 
-# ─────────────────────────── Logging ──────────────────────────────────────
+# ────────────────────────────── Logging ──────────────────────────────────
 LOGLEVEL = getattr(
     logging,
     os.getenv("PLANNER_LOG_LEVEL", "INFO").upper(),
@@ -41,120 +49,128 @@ logging.basicConfig(
 )
 logger = logging.getLogger("planner_service")
 
-# ───────────────────── Prompt template ────────────────────────────────────
+# ─────────────────── gRPC connection (singleton) ────────────────────────
+_MODEL_SERVER_URL = os.getenv("MODEL_SERVER_URL", "localhost:50051")
+
+_channel: grpc.aio.Channel | None = None
+_stub: model_pb2_grpc.GeneratorStub | None = None
+
+
+def _get_stub() -> model_pb2_grpc.GeneratorStub:
+    """Create/re-use a single async stub."""
+    global _channel, _stub
+    if _stub is None:
+        logger.info("Connecting to LLM micro-service @ %s …", _MODEL_SERVER_URL)
+        _channel = grpc.aio.insecure_channel(_MODEL_SERVER_URL)
+        _stub = model_pb2_grpc.GeneratorStub(_channel)
+    return _stub
+
+
+async def _generate_remote(prompt: str, cfg: GenerationConfig) -> str:
+    """
+    Call **StreamGenerate** and glue the streamed chunks together.
+    """
+    stub = _get_stub()
+    req = model_pb2.GenerateRequest(
+        prompt=prompt,
+        max_new_tokens=cfg.max_new_tokens,
+        temperature=cfg.temperature,
+        top_p=cfg.top_p,
+    )
+
+    pieces: List[str] = []
+    async for chunk in stub.StreamGenerate(req):
+        pieces.append(chunk.text)
+    return "".join(pieces).strip()
+
+
+# ───────────── Prompt template (braces escaped with {{ }}) ──────────────
 PROMPT_BODY = """
-You are a *document-retrieval* and *execution* assistant.
+You are a *document-retrieval* **and** *execution* assistant.
 
-Allowed targets:
-- **CSV** files inside the `data/` folder,
-- **Python scripts** inside `user_data/` via shell execution.
+Allowed targets
+– **CSV** files inside the `data/` folder
+– **Python scripts** inside `user_data/` (via shell execution)
 
-**Important:** Always begin your output with the keyword `Response:` on its own line, then immediately follow with the JSON block.
-
-Return *EXACTLY ONE* JSON object whose ONLY key is "source_queries". Schema:
+**Important** – always begin your answer with the keyword `Response:` on
+its own line, then immediately output a single JSON object:
 
 {{
   "source_queries": [
     {{
-      "source_type": "<'csv' or 'shell'>",
-      "file_path": "<path/to/file>"
+      "source_type": "<'csv' | 'shell'>",
+      "file_path": "<relative/path/to/file>"
     }}
   ]
 }}
 
-No extra keys, no prose - just the JSON block.
+No extra keys, no explanatory prose – *just* that JSON.
 
 User question: "{question}"
 """.strip()
 
-# Regex to grab the first {...} block (even if nested braces)
 _JSON_RE = re.compile(r"\{(?:[^{}]|\{[^{}]*\})*\}", re.DOTALL)
 
 
 def _first_json(text: str) -> str:
+    """Return the first JSON‐looking block in *text*."""
     m = _JSON_RE.search(text)
     if not m:
         raise ValueError("No JSON found in:\n" + text)
     return m.group(0)
 
 
-# ───────────────────── Planner entrypoint ─────────────────────────────────
+# ───────────────────────────── Planner API ──────────────────────────────
 async def plan(question: str) -> Dict[str, Any]:
-    logger.info("Planning: %s", question)
+    """
+    Ask the LLM for a plan and return e.g.
+        {"source_queries": [{"source_type":"csv", "file_path": …}, …]}
+    """
+    logger.info("Planning for: %s", question)
 
-    # 1) Build catalog summaries
+    # 1) Catalog summaries -------------------------------------------------
     try:
-        csv_cat = load_csv_catalog()
-        csv_summary = render_csv_catalog_summary(csv_cat)
-    except Exception as exc:
-        logger.warning("CSV catalog load failed: %s", exc)
+        csv_summary = render_csv_catalog_summary(load_csv_catalog())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("CSV catalog unavailable: %s", exc)
         csv_summary = "WARNING: CSV catalog unavailable."
 
     try:
-        script_cat = load_script_catalog()
-        script_summary = render_script_catalog_summary(script_cat)
-    except Exception as exc:
-        logger.warning("Script catalog load failed: %s", exc)
+        script_summary = render_script_catalog_summary(load_script_catalog())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Script catalog unavailable: %s", exc)
         script_summary = "WARNING: script catalog unavailable."
 
-    # 2) Compose full prompt
-    full_prompt = "\n\n".join([
-        csv_summary,
-        script_summary,
-        PROMPT_BODY.format(question=question),
-    ])
-    logger.debug("── Prompt to LLM ──\n%s\n── end prompt ──", full_prompt)
-
-    # 3) Tokenize & generate
-    inp = tokenizer(full_prompt, return_tensors="pt").to(model.device)
-    t0 = time.time()
-    out_ids = model.generate(
-        **inp,
-        generation_config=GenerationConfig(
-            max_new_tokens=160,
-            do_sample=False,
-            temperature=0.0,
-            top_p=1.0,
-            eos_token_id=tokenizer.eos_token_id,
-            pad_token_id=tokenizer.eos_token_id,
-        ),
+    # 2) Compose prompt ----------------------------------------------------
+    prompt = "\n\n".join(
+        [csv_summary, script_summary, PROMPT_BODY.format(question=question)]
     )
-    logger.info("Generation %.2f s", time.time() - t0)
+    logger.debug("── Prompt sent to LLM ──\n%s\n── end prompt ──", prompt)
 
-    # 4) Decode full output
-    raw_full = tokenizer.decode(out_ids[0], skip_special_tokens=True).strip()
-    logger.debug("LLM raw full output:\n%s", raw_full)
+    # 3) Remote generation --------------------------------------------------
+    cfg = GenerationConfig(max_new_tokens=160, temperature=0.0, top_p=1.0)
+    t0 = time.time()
+    raw = await _generate_remote(prompt, cfg)
+    logger.info("LLM round-trip %.2f s", time.time() - t0)
+    logger.debug("LLM raw output:\n%s", raw)
 
-    # 5) Strip everything through the first Response→JSON marker
+    # 4) Keep everything after the marker ----------------------------------
     marker = re.compile(
         r"Response\s*:\s*\{\s*\"source_queries\"\s*:\s*\[\s*\{",
         re.IGNORECASE | re.DOTALL,
     )
-    m = marker.search(raw_full)
-    if m:
-        start = raw_full.find("{", m.start())
-        raw_after = raw_full[start:]
-        logger.debug("After slicing at custom marker:\n%s", raw_after)
-    else:
-        raw_after = raw_full
+    m = marker.search(raw)
+    after = raw[raw.find("{", m.start()) :] if m else raw
 
-    # 6) Extract only the first JSON block
-    try:
-        json_block = _first_json(raw_after)
-        logger.debug("Extracted JSON block:\n%s", json_block)
-    except ValueError as err:
-        logger.error("JSON extraction failed: %s", err)
-        raise RuntimeError("Planner returned malformed or missing JSON") from err
+    # 5) Extract & parse JSON ----------------------------------------------
+    json_block = _first_json(after)
+    logger.debug("Extracted JSON block:\n%s", json_block)
 
-    # 7) Parse & normalize
-    plan_obj = json.loads(json_block)
-    if "source_queries" not in plan_obj and plan_obj.get("source_type") == "file":
+    plan_obj: Dict[str, Any] = json.loads(json_block)
+    if "source_queries" not in plan_obj and plan_obj.get("source_type"):
+        # LLM returned a single object → wrap it in a list.
         plan_obj = {"source_queries": [plan_obj]}
 
-    logger.info(
-        "Planner produced %d file-query(ies)",
-        len(plan_obj.get("source_queries", [])),
-    )
+    logger.info("Planner returned %d source-query(ies)", len(plan_obj["source_queries"]))
     logger.debug("Final plan_obj: %s", plan_obj)
-
     return plan_obj

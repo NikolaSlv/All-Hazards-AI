@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+/* ─────────────────────────────────────────────
+   Llama model text-generation gRPC service
+   ───────────────────────────────────────────── */
+
+service Generator {
+  // Bidirectional streaming: one request → many chunks.
+  rpc StreamGenerate (GenerateRequest) returns (stream GenerateChunk);
+}
+
+message GenerateRequest {
+  string prompt         = 1;
+  int32  max_new_tokens = 2;
+  double temperature    = 3;
+  double top_p          = 4;
+}
+
+message GenerateChunk {
+  string text = 1;   // next token / chunk
+}

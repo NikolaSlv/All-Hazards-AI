@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # ──────────────────────────────────────────────────────────────────────────
-# dev.sh
-#   Hot-reload FastAPI *only*; the heavy LLM runs in its own gRPC process.
+# start_llm.sh
+#   Keeps the Meta-Llama model resident in a dedicated gRPC micro-service.
+#   Run this once (separate terminal / tmux pane) BEFORE running dev.sh.
 # ──────────────────────────────────────────────────────────────────────────
 
 # 1) repo root -------------------------------------------------------------
@@ -18,36 +19,12 @@ elif [[ -f "$VENV_DIR/bin/activate"   ]]; then source "$VENV_DIR/bin/activate"  
 else echo "❌  activate script not found in $VENV_DIR"; exit 1
 fi
 
-# 3) .env ------------------------------------------------------------------
+# 3) .env (for HF_TOKEN etc.) ---------------------------------------------
 [[ -f .env ]] && { echo "📄  Loading .env"; set -a; source .env; set +a; }
 
-# 4) optional catalogue rebuilds ------------------------------------------
-rebuild() {            # $1 prompt  $2 python callable
-  local prompt="$1" fn="$2" ans
-  if [[ -t 0 ]]; then
-    read -rp "$prompt (Y/N): " ans; ans=${ans^^}
-  else
-    ans="N"
-  fi
-  if [[ "$ans" == "Y" ]]; then
-    echo "🔄  Running $fn"
-    python - <<PY
-import importlib
-mod, fn = "$fn".rsplit(".", 1)
-getattr(importlib.import_module(mod), fn)()
-PY
-  fi
-}
-rebuild "Regenerate CSV catalogue?"    "app.services.catalog_generation.csv_cat.save_csv_catalog"
-rebuild "Regenerate script catalogue?" "app.services.catalog_generation.script_cat.save_script_catalog"
+# 4) make sure project root is on PYTHONPATH ------------------------------
+export PYTHONPATH="$SCRIPT_DIR:${PYTHONPATH:-}"
 
-# 5) launch FastAPI with hot reload (watch only app/, ignore protobuf stubs)
-echo "🚀  FastAPI dev server on http://localhost:8000  (auto-reload)"
-uvicorn app.main:app \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --reload \
-  --reload-dir app \
-  --reload-exclude model_server.py \
-  --reload-exclude '*_pb2.py' \
-  --reload-exclude '*_pb2_grpc.py'
+# 5) launch gRPC model-server ---------------------------------------------
+echo "🚀  Starting LLM gRPC server (app/services/model_server.py) on port 50051 …"
+python -m app.services.model_server
