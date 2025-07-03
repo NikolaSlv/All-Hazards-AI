@@ -72,7 +72,7 @@ async def _generate_remote(prompt: str, cfg: GenerationConfig) -> str:
     """
     stub = _get_stub()
     req = model_pb2.GenerateRequest(
-        prompt=prompt,
+        user_content=prompt,
         max_new_tokens=cfg.max_new_tokens,
         temperature=cfg.temperature,
         top_p=cfg.top_p,
@@ -84,16 +84,15 @@ async def _generate_remote(prompt: str, cfg: GenerationConfig) -> str:
     return "".join(pieces).strip()
 
 
-# ───────────── Prompt template (braces escaped with {{ }}) ──────────────
+# ───────────── Prompt template ──────────────
 PROMPT_BODY = """
 You are a *document-retrieval* **and** *execution* assistant.
 
 Allowed targets
-– **CSV** files inside the `data/` folder
-– **Python scripts** inside `user_data/` (via shell execution)
+- **CSV** files inside the `data/` folder  
+- **Python scripts** inside `user_data/` (via shell execution)
 
-**Important** – always begin your answer with the keyword `Response:` on
-its own line, then immediately output a single JSON object:
+**Important** - always begin your answer with the keyword `Response:` on its own line, then immediately output a single JSON object:
 
 {{
   "source_queries": [
@@ -104,7 +103,10 @@ its own line, then immediately output a single JSON object:
   ]
 }}
 
-No extra keys, no explanatory prose – *just* that JSON.
+Rules
+- If the question can be answered **without** reading a CSV or running a script,
+  return an *empty* array: `"source_queries": []`.  
+- No extra keys, no explanatory prose - *just* that JSON object.
 
 User question: "{question}"
 """.strip()
@@ -154,15 +156,26 @@ async def plan(question: str) -> Dict[str, Any]:
     logger.info("LLM round-trip %.2f s", time.time() - t0)
     logger.debug("LLM raw output:\n%s", raw)
 
-    # 4) Keep everything after the marker ----------------------------------
-    marker = re.compile(
-        r"Response\s*:\s*\{\s*\"source_queries\"\s*:\s*\[\s*\{",
+    # 4-a) Did the model say no data needed?  Accept both variants:
+    #      Response: []              OR  Response: {"source_queries": []}
+    empty_match = re.search(
+        r"Response\s*:\s*(\[\s*\]|\{\s*\"source_queries\"\s*:\s*\[\s*\]\s*\})",
+        raw,
         re.IGNORECASE | re.DOTALL,
     )
-    m = marker.search(raw)
+    if empty_match:
+        logger.debug("LLM signalled empty plan (no source queries).")
+        return {"source_queries": []}
+
+    # 4-b) Otherwise look for the full-object marker
+    obj_marker = re.compile(
+        r"Response\s*:\s*\{\s*\"source_queries\"\s*:\s*\[",  # opening of list
+        re.IGNORECASE | re.DOTALL,
+    )
+    m = obj_marker.search(raw)
     after = raw[raw.find("{", m.start()) :] if m else raw
 
-    # 5) Extract & parse JSON ----------------------------------------------
+    # 5) Extract & parse the first JSON block ------------------------------
     json_block = _first_json(after)
     logger.debug("Extracted JSON block:\n%s", json_block)
 

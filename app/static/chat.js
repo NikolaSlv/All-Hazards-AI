@@ -5,38 +5,58 @@
   const msgs     = document.getElementById('messages');
   let botBubble  = null;
 
+  /* Utility to append a list-item “bubble” ----------------- */
   function addBubble(text, cls) {
     const li = document.createElement('li');
-    li.className = `list-group-item ${cls}`;
+    li.className = `list-group-item ${cls}`.trim();
     li.textContent = text;
     msgs.appendChild(li);
     msgs.scrollTop = msgs.scrollHeight;
     return li;
   }
 
+  /* Send a user message ------------------------------------ */
   function send() {
     const q = inp.value.trim();
     if (!q) return;
+
+    /* Show user bubble */
     addBubble(`You: ${q}`, 'user');
+
+    /* Show placeholder “Thinking…” bubble immediately */
+    botBubble = addBubble('Thinking…', 'bot thinking');
+
     inp.value = '';
-    botBubble = null;
     ws.send(JSON.stringify({ question: q }));
   }
 
   btn.onclick = send;
   inp.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 
+  /* Handle streaming tokens -------------------------------- */
   ws.onmessage = ({ data }) => {
     if (data === '[DONE]') {
       botBubble = null;
       return;
     }
+
+    // Ignore empty / whitespace-only chunks while still “Thinking…”
+    if (botBubble && botBubble.classList.contains('thinking')) {
+      if (data.trim() === '') return;   // nothing useful yet
+
+      // First real token ➜ switch bubble out of “thinking” mode
+      botBubble.classList.remove('thinking');
+      botBubble.textContent = '';       // clear “…”
+    }
+
+    // Safety: recreate bubble if it vanished for any reason
     if (!botBubble) botBubble = addBubble('', 'bot');
-    botBubble.textContent += data;
+
+    botBubble.textContent += data;      // append streamed chunk
   };
 
   ws.onopen  = () => console.log('WS connected');
-  ws.onerror = e => console.error('WS error', e);
+  ws.onerror = e  => console.error('WS error', e);
 })();
 
 // ── File‐upload logic ──

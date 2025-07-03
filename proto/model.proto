@@ -10,7 +10,7 @@ service Generator {
 }
 
 message GenerateRequest {
-  string prompt         = 1;
+  string user_content   = 1;
   int32  max_new_tokens = 2;
   double temperature    = 3;
   double top_p          = 4;

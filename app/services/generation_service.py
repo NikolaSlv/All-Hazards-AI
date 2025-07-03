@@ -1,6 +1,6 @@
 """
-Streams answer text token-by-token by delegating to the **external LLM
-gRPC micro-service**.
+Streams answer text token-by-token by delegating to the external LLM
+gRPC micro-service.
 
 The FastAPI layer stays light and can reload instantly, while the heavy
 model lives in its own long-running process.
@@ -14,7 +14,7 @@ from typing import Callable, Dict, List, Any
 
 import grpc
 import model_pb2 as pb
-import model_pb2_grpc as pbr  # generated stubs
+import model_pb2_grpc as pbr          # generated stubs
 
 from app.adapters.csv_adapter import format_csv_for_prompt
 from app.adapters.shell_adapter import format_shell_for_prompt
@@ -23,8 +23,8 @@ logger = logging.getLogger("generation_service")
 
 # ───────────────────────── Source-type   →  formatter ────────────────────
 ADAPTERS: Dict[str, Callable[..., Any]] = {
-    "csv":   format_csv_for_prompt,   # sync
-    "shell": format_shell_for_prompt, # async
+    "csv":   format_csv_for_prompt,    # sync
+    "shell": format_shell_for_prompt,  # async
 }
 
 # ─────────────────────── gRPC channel / stub (singleton) ──────────────────
@@ -44,14 +44,19 @@ async def _get_stub() -> pbr.GeneratorStub:
 
 # ───────────────────────────── Prompt builder ────────────────────────────
 async def _build_prompt(question: str, queries: List[Dict[str, str]]) -> str:
-    parts: List[str] = [question, ""]
+    """
+    Builds the *user content* message that we will forward to the
+    model-server.  The server itself will wrap this into the model’s
+    chat-template, so no role tags are added here.
+    """
+    parts: List[str] = [question.strip(), ""]
     for q in queries:
         fmt = ADAPTERS.get(q.get("source_type"))
         if not fmt:
             continue
         snippet = await fmt(q) if asyncio.iscoroutinefunction(fmt) else fmt(q)
-        parts.extend([snippet, ""])
-    return "\n".join(parts)
+        parts.extend([snippet.strip(), ""])
+    return "\n".join(parts).strip()   # single trailing newline
 
 
 # ───────────────────────── Public streaming API ───────────────────────────
@@ -63,18 +68,20 @@ async def generate_answer_stream(
     Async-generator that yields text chunks as soon as they arrive from the
     gRPC `StreamGenerate` endpoint.
     """
-    prompt = await _build_prompt(question, source_queries)
-    logger.debug("⇢ prompt to model-server:\n%s", prompt)
+    user_content = await _build_prompt(question, source_queries)
+    logger.debug("⇢ user-content to model-server:\n%s", user_content)
 
     stub = await _get_stub()
+
+    MAX_NEW = int(os.getenv("MAX_NEW_TOKENS", "256"))
+
     req = pb.GenerateRequest(
-        prompt         = prompt,
-        max_new_tokens = 256,
+        user_content   = user_content,   # <── changed
+        max_new_tokens = MAX_NEW,
         temperature    = 0.7,
         top_p          = 0.9,
     )
 
     # `StreamGenerate` is an async iterator of `GenerateChunk`
     async for chunk in stub.StreamGenerate(req):
-        logger.debug("⇠ token: %s", repr(chunk.text))
         yield chunk.text

@@ -1,32 +1,105 @@
-/* Bootstrap provides most styling; here are the overrides: */
+/* =========================================================
+   All Hazards AI • style.css  – modern glass UI
+   ======================================================= */
 
+/* ---------- root palette -------------------------------- */
+:root {
+  --bot-bg:  #eef0f3;                             /* light gray */
+  --you-bg:  linear-gradient(135deg,#377dff 0%,#2b50ff 100%);
+  --page-bg: #e5e8ee;
+  --glass:   rgba(255,255,255,0.55);
+}
+
+/* ---------- base font ----------------------------------- */
+body { font-family: "Inter", system-ui, sans-serif; }
+
+/* ---------- page background ----------------------------- */
+.page-bg { background: var(--page-bg); }
+
+/* ---------- glass helpers ------------------------------- */
+.glass,
+.glass-navbar {
+  background: var(--glass);
+  backdrop-filter: blur(14px) saturate(150%);
+  border: 1px solid rgb(255 255 255 / 0.4);
+}
+.glass { border-radius: 1rem; }
+
+/* ---------- chat card size ------------------------------ */
+.chat-card {
+  height: 80vh;
+  max-width: 1100px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* stop body from overflowing glass panel */
+.chat-card .card-body {
+  flex: 1 1 auto;
+  overflow: hidden;                /* important for inner scroll */
+}
+
+/* ---------- message list (scrolls) ---------------------- */
 #messages {
+  list-style: none;
+  margin: 0;
   padding: 0;
+  flex: 1 1 auto;                  /* fill card-body */
+  overflow: auto;                  /* internal scroll */
 }
 
 #messages .list-group-item {
-  background: none;
+  background: none;                /* no !important so bubbles win */
   border: none;
+  padding: 0;
+  width: auto;
+}
+
+/* ---------- shared bubble styling ----------------------- */
+#messages li {
   white-space: pre-wrap;
-  font-family: "Courier New", monospace;
-  line-height: 1.4;
+  line-height: 1.5;
+  margin-bottom: 0.75rem;
+  max-width: 80%;
+  opacity: 0;
+  animation: slideFade 0.35s ease-out forwards;
 }
 
-#messages .user {
-  text-align: right;
-  color: #0d6efd;
-}
-
+/* bot bubble */
 #messages .bot {
-  text-align: left;
-  background-color: rgba(0, 0, 0, 0.05);
-  border-radius: 0.375rem;
+  display: inline-block;
+  margin-right: auto;
+  background: var(--bot-bg);
+  color: #000;
+  padding: 0.55rem 0.9rem;
+  border-radius: 1.25rem;
 }
 
-#messages::-webkit-scrollbar {
-  width: 6px;
+/* user bubble */
+#messages .user {
+  display: inline-block;
+  margin-left: auto;
+  background: var(--you-bg);
+  color: #fff;
+  padding: 0.55rem 0.9rem;
+  border-radius: 1.25rem;
 }
+
+/* thinking placeholder */
+#messages .thinking { font-style: italic; color: #6c757d; }
+
+/* ---------- scrollbar polish ---------------------------- */
+#messages::-webkit-scrollbar { width: 8px; }
 #messages::-webkit-scrollbar-thumb {
-  background: rgba(0,0,0,0.2);
-  border-radius: 3px;
+  background: rgba(0,0,0,0.25);
+  border-radius: 4px;
+}
+
+/* ---------- python-file output pane --------------------- */
+#file-result { max-height: 200px; overflow: auto; }
+
+/* ---------- animations --------------------------------- */
+@keyframes slideFade {
+  from { transform: translateY(12px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
 }
