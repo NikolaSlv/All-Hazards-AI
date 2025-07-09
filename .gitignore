@@ -8,3 +8,4 @@ data/*
 !data/.gitkeep
 model_pb2_grpc.py
 model_pb2.py
+.vector_store/

@@ -1,71 +1,91 @@
+#!/usr/bin/env python
 """
-app/adapters/csv_adapter.py
-────────────────────────────────────────────────────────────────────────────
-Utility that turns a small slice of a CSV file into a Markdown snippet
-suitable for an LLM prompt.
+Turn a *relevant* slice of a CSV into a Markdown snippet for the LLM.
 
-• Row / column limits are **configurable via environment variables**  
-  ── MAX_CSV_RETR_ROWS  (default 10)  
-  ── MAX_CSV_RETR_COLS  (default 10)
+• Direct-match: if the user’s question contains an explicit date like
+  “03/16/2023”, we grab that row in O(1) and skip FAISS.
+• Otherwise: semantic retrieval via search_rows() as before.
 
-Example query object:
-    {"source_type": "csv", "file_path": "data/foo.csv"}
+Env vars
+--------
+MAX_CSV_RETR_ROWS, MAX_CSV_RETR_COLS  (same as before)
 """
-
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
+from app.services.vector_index import search_rows
 
-# ───────────────────────────── Config ──────────────────────────────
-MAX_ROWS = int(os.getenv("MAX_CSV_RETR_ROWS", 10))
-MAX_COLS = int(os.getenv("MAX_CSV_RETR_COLS", 10))
+# ───────────────────────────────────────── config ──────────────────────────────────────
+MAX_ROWS = int(os.getenv("MAX_CSV_RETR_ROWS", "10"))
+MAX_COLS = int(os.getenv("MAX_CSV_RETR_COLS", "10"))
+
+# regex: 1- or 2-digit month/day, 2- or 4-digit year
+_DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b")
+
+# ───────────────────────────────────── helpers ─────────────────────────────────────────
+def _extract_date_token(text: str) -> Optional[str]:
+    """Return the first raw date token in *text* or None."""
+    m = _DATE_RE.search(text)
+    return m.group(0) if m else None
 
 
-# ─────────────────── Formatter used by generation_service ──────────
-def format_csv_for_prompt(query: Dict[str, Any]) -> str:
+def _direct_date_slice(date_token: str, df: pd.DataFrame) -> pd.DataFrame | None:
     """
-    Build a Markdown snippet with
-      • short summary (row-count, first N column names)
-      • GitHub-flavoured Markdown preview table
-
-    The preview table is capped at MAX_ROWS × MAX_COLS but will show the
-    full data if the file is smaller than those limits.
+    Fast path: filter rows whose *Date* column equals the user's date.
+    Works on all OSes because we compare datetime.date objects instead
+    of using strftime flags like %-m or %#m.
     """
-    # 1) Resolve full path relative to repo root
+    try:
+        dt_obj = pd.to_datetime(date_token, errors="raise")
+    except (ValueError, TypeError):
+        return None
+
+    # Cache the parsed column so we don’t re-parse on every call
+    if "_dt_cache" not in df.attrs:
+        df.attrs["_dt_cache"] = pd.to_datetime(df.iloc[:, 0], errors="coerce").dt.date
+
+    mask = df.attrs["_dt_cache"] == dt_obj.date()
+    hit  = df[mask]
+    return hit if not hit.empty else None
+
+# ─────────────────────────────────── adapter API ───────────────────────────────────────
+def format_csv_for_prompt(question: str, query: Dict[str, Any]) -> str:
+    """
+    Parameters
+    ----------
+    question : str
+    query    : {"source_type":"csv", "file_path":"data/foo.csv"}
+    """
     repo_root = Path(__file__).resolve().parents[2]
     full_path = repo_root / query["file_path"]
 
-    # 2) Count total data rows  (skip the header itself)
-    with full_path.open(encoding="utf-8", errors="ignore") as fh:
-        total_rows = max(sum(1 for _ in fh) - 1, 0)
+    # Read once, all downstream ops use the same df
+    df = pd.read_csv(full_path, dtype=str, engine="python", skiprows=1)
 
-    # 3) Read only the preview slice
-    df_prev = pd.read_csv(
-        full_path,
-        nrows=MAX_ROWS,
-        low_memory=False,
-        dtype=str,
-        skiprows=1,          # skip a metadata header row if you have one
-    )
+    # 1) Try the direct-date shortcut
+    token = _extract_date_token(question)
+    if token:
+        df_prev = _direct_date_slice(token, df)
+        if df_prev is not None and not df_prev.empty:
+            df_prev = df_prev.iloc[:MAX_ROWS]      # still respect row cap
+    # 2) Otherwise fall back to FAISS
+    if token is None or df_prev is None or df_prev.empty:
+        row_ids: List[int] = search_rows(question, str(full_path), k=MAX_ROWS)
+        if not row_ids:                           # last-chance fallback
+            row_ids = list(range(min(MAX_ROWS, len(df))))
+        df_prev = df.iloc[row_ids]
 
-    # 4) Trim to first MAX_COLS columns (if necessary)
+    # Column cap
     if df_prev.shape[1] > MAX_COLS:
         df_prev = df_prev.iloc[:, :MAX_COLS]
 
-    # 5) Compose summary header
-    col_names = list(df_prev.columns)
     header = (
-        f"**CSV Summary:** {total_rows} rows in file; "
-        f"showing first {len(df_prev)} row(s) × {len(col_names)} column(s) → "
-        + ", ".join(col_names)
+        f"**CSV Preview:** {len(df):,} total rows; "
+        f"showing {len(df_prev)} row(s) × {df_prev.shape[1]} col(s)"
     )
-
-    # 6) Render GitHub-style Markdown table
-    table_md = df_prev.to_markdown(index=False)
-
-    # 7) Wrap in ```csv code-fence for clarity
-    return f"{header}\n\n```csv\n{table_md}\n```"
+    return f"{header}\n\n```csv\n{df_prev.to_markdown(index=False)}\n```"

@@ -4,7 +4,15 @@ PLANNER_LOG_LEVEL=DEBUG
 MODEL_SERVER_URL=localhost:50051
 MAX_NEW_TOKENS=2048
 
-# Force precision / strategy if you like:
+# ── Vector DB / embeddings ────────────────────────────────
+VEC_MODEL_NAME=sentence-transformers/all-mpnet-base-v2
+# number of preview rows per query:
+VEC_TOP_K=8
+# guard-rail for very large CSVs (0 = no limit):
+MAX_PREVIEW_ROWS=0
+MAX_PREVIEW_COLS=0
+
+# Force precision / strategy:
 #   fp16  |  bf16  |  4bit  |  cpu
 LLM_LOAD_MODE=4bit
 
