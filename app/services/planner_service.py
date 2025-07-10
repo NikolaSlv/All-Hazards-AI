@@ -32,6 +32,10 @@ from app.services.catalog_generation.csv_cat import (
     load_csv_catalog,
     render_csv_catalog_summary,
 )
+from app.services.catalog_generation.pdf_cat import (
+    load_pdf_catalog,
+    render_pdf_catalog_summary,
+)
 from app.services.catalog_generation.script_cat import (
     load_script_catalog,
     render_script_catalog_summary,
@@ -89,7 +93,8 @@ PROMPT_BODY = """
 You are a *document-retrieval* **and** *execution* assistant.
 
 Allowed targets
-- **CSV** files inside the `data/` folder  
+- **CSV** files inside the `data/` folder
+- **PDF** files inside the `data/` folder
 - **Python scripts** inside `user_data/` (via shell execution)
 
 **Important** - always begin your answer with the keyword `Response:` on its own line, then immediately output a single JSON object:
@@ -97,7 +102,7 @@ Allowed targets
 {{
   "source_queries": [
     {{
-      "source_type": "<'csv' | 'shell'>",
+      "source_type": "<'csv' | 'pdf' | 'script'>",
       "file_path": "<relative/path/to/file>"
     }}
   ]
@@ -138,6 +143,12 @@ async def plan(question: str) -> Dict[str, Any]:
         csv_summary = "WARNING: CSV catalog unavailable."
 
     try:
+        pdf_summary = render_pdf_catalog_summary(load_pdf_catalog())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("PDF catalog unavailable: %s", exc)
+        pdf_summary = "WARNING: PDF catalog unavailable."
+
+    try:
         script_summary = render_script_catalog_summary(load_script_catalog())
     except Exception as exc:  # noqa: BLE001
         logger.warning("Script catalog unavailable: %s", exc)
@@ -145,7 +156,7 @@ async def plan(question: str) -> Dict[str, Any]:
 
     # 2) Compose prompt ----------------------------------------------------
     prompt = "\n\n".join(
-        [csv_summary, script_summary, PROMPT_BODY.format(question=question)]
+        [csv_summary, pdf_summary, script_summary, PROMPT_BODY.format(question=question)]
     )
     logger.debug("── Prompt sent to LLM ──\n%s\n── end prompt ──", prompt)
 

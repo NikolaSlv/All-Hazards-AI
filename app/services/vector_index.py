@@ -1,201 +1,260 @@
 #!/usr/bin/env python
 """
-Light-weight FAISS index: one vector per CSV row, embedding
-RowKey + *many* common date variants + column names.
+Dual FAISS stores: one for CSV rows, one for PDF chunks.
 
-Public API
-----------
-search_rows(question, csv_path, k=8)          → [row_idx, …]
-search_rows_multi(question, csv_paths, k=8)   → {path: [row_idx, …], …}
-
-2025-07-09 update ④
--------------------
-* Expanded **_row_repr()** to embed six canonical spellings for each
-  date (with and without leading zeros, ISO, month names, …).
-* Everything else is behaviour-identical to the ③ release.
+APIs
+----
+search_rows(question, csv_path, k=8)          → [row_idx, …]           # CSV index
+search_rows_multi(question, csv_paths, k=8)   → {path: [row_idx,…],…}  # CSV index
+search_pdf_chunks(question, pdf_path, k=8)    → [(page,chunk), …]      # PDF index
 """
 from __future__ import annotations
-
 import logging
 import os
+import re
 from pathlib import Path
-from typing import Dict, Iterator, List, Sequence, Tuple
+from typing import Iterator, List, Sequence, Tuple, Dict
 
+import torch
 import faiss
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
+from pypdf import PdfReader
+from dateutil import parser as dp
 
 logger = logging.getLogger("vector_index")
 
-# ───────────────────────────────────────── config ──────────────────────────────────────
-DATA_DIR   = Path("data")
-OUT_DIR    = Path(".vector_store")
-MODEL_NAME = os.getenv("VEC_MODEL_NAME", "sentence-transformers/all-mpnet-base-v2")
+# ───────────────────────── config ─────────────────────────
+DATA_DIR     = Path("data")
+OUT_DIR      = Path(".vector_store")
+CSV_DIR      = OUT_DIR / "csv"
+PDF_DIR      = OUT_DIR / "pdf"
+MODEL_NAME   = os.getenv("VEC_MODEL_NAME", "Qwen/Qwen3-Embedding-0.6B")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-OUT_DIR.mkdir(exist_ok=True)
-INDEX_FILE = OUT_DIR / "index.faiss"
-META_FILE  = OUT_DIR / "meta.parquet"
+# pick GPU if available
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+logger.info(f"Using device for embeddings: {DEVICE}")
 
-# ───────────────────────────────────── helpers ─────────────────────────────────────────
-def _norm_path(p: str | Path) -> str:
-    """Cheap, case-insensitive POSIX normalisation (fallback comparison)."""
+for d in (CSV_DIR, PDF_DIR):
+    d.mkdir(parents=True, exist_ok=True)
+
+CSV_INDEX = CSV_DIR / "index.faiss"
+CSV_META  = CSV_DIR / "meta.parquet"
+PDF_INDEX = PDF_DIR / "index.faiss"
+PDF_META  = PDF_DIR / "meta.parquet"
+
+# ─────────────────────── helpers ─────────────────────────
+def _norm(p: str | Path) -> str:
     return Path(p).as_posix().lower()
 
-
-def _same_file(a: str | Path, b: str | Path) -> bool:
-    """True if *a* and *b* refer to the same file (symlinks handled)."""
-    try:
-        return Path(a).resolve().samefile(b)
-    except FileNotFoundError:
-        return _norm_path(a) == _norm_path(b)
-
-
-# ── date helpers ─────────────────────────────────────────────────────────────
 def _date_variants(raw: str) -> List[str]:
-    """
-    Return multiple spellings for a date string – makes numeric-only
-    queries like “02/25/2023” match just as well as “Feb 25 2023”.
-    """
-    from dateutil import parser as dp
-
     try:
-        dt = dp.parse(raw, dayfirst=False, yearfirst=False)
-    except (ValueError, OverflowError):
+        dt = dp.parse(raw)
+    except Exception:
         return []
-
+    m, d, y = dt.month, dt.day, dt.year
+    suf = {1:'st',2:'nd',3:'rd'}.get(d if d<20 else d%10, 'th')
+    od  = f"{d}{suf}"
     return [
-        dt.strftime("%-m/%-d/%Y"),   # 2/5/2023
-        dt.strftime("%m/%d/%Y"),     # 02/05/2023
-        dt.strftime("%-m/%-d/%y"),   # 2/5/23
-        dt.strftime("%Y-%m-%d"),     # 2023-02-05
-        dt.strftime("%B %-d %Y"),    # February 5 2023
-        dt.strftime("%b %-d %Y"),    # Feb 5 2023
+        f"{m}/{d}/{y}", dt.strftime("%m/%d/%Y"), f"{m}/{d}/{str(y)[2:]}",
+        dt.strftime("%Y-%m-%d"),
+        f"{dt.strftime('%B')} {d} {y}", f"{dt.strftime('%b')} {d} {y}",
+        f"{dt.strftime('%B')} {od} {y}", f"{dt.strftime('%b')} {od} {y}",
     ]
 
+_NUM_DATE_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
 
-def _row_repr(df: pd.DataFrame, row_idx: int) -> str:
-    """Return the text embedded for one CSV row."""
-    row_key = str(df.iloc[row_idx, 0]).strip()       # e.g. 3/16/2023
-    parts   = [f"RowKey={row_key}", * _date_variants(row_key)]
-    parts  += [f"Cols={', '.join(df.columns[:50])}"]
-    return " | ".join(parts)
+def _augment_question_with_dates(question: str) -> str:
+    # 1) numeric date
+    m = _NUM_DATE_RE.search(question)
+    if m:
+        raw = m.group(0)
+    else:
+        # 2) fuzzy parse fallback
+        try:
+            dt = dp.parse(question, fuzzy=True)
+            raw = dt.strftime("%m/%d/%Y")
+        except Exception:
+            return question
+    variants = _date_variants(raw)
+    if not variants:
+        return question
+    return question + " | " + " | ".join(variants)
 
-
-def _iter_rows() -> Iterator[Tuple[str, str, int]]:
-    """Yield (text, csv_path, row_idx) for every row in DATA_DIR/*.csv."""
+# ────────────────── CSV iteration ───────────────────────
+def _iter_csv_items() -> Iterator[Tuple[str, str, int]]:
     for csv_path in sorted(DATA_DIR.glob("*.csv")):
         try:
-            logger.debug("Reading %s via pyarrow", csv_path)
             df = pd.read_csv(csv_path, dtype=str, engine="pyarrow", skiprows=1)
-        except Exception as e:                       # noqa: BLE001
-            logger.debug("PyArrow failed for %s: %s → fallback", csv_path, e)
+        except Exception:
             df = pd.read_csv(csv_path, dtype=str, engine="python", skiprows=1)
-
+        npath = _norm(csv_path)
         for i in range(len(df)):
-            yield _row_repr(df, i), _norm_path(csv_path), i
+            key  = str(df.iloc[i, 0]).strip()
+            # only embed the RowKey + its date variants
+            text = " | ".join([f"RowKey={key}", *_date_variants(key)])
+            yield text, npath, i
 
-# ─────────────────────────────────── build index ───────────────────────────────────────
-def build_index() -> None:
-    """(Re)create the FAISS index from every CSV file in DATA_DIR."""
-    model = SentenceTransformer(MODEL_NAME, device="cpu")
+# ─────────────────── PDF iteration ────────────────────────
+def _iter_pdf_items(max_chars: int = 2000) -> Iterator[Tuple[str, str, int]]:
+    for pdf_path in sorted(DATA_DIR.glob("*.pdf")):
+        npath  = _norm(pdf_path)
+        reader = PdfReader(str(pdf_path))
+        for pno, page in enumerate(reader.pages, start=1):
+            txt = page.extract_text() or ""
+            for ck, st in enumerate(range(0, len(txt), max_chars)):
+                chunk      = txt[st:st+max_chars]
+                snippet    = re.sub(r"\s+", " ", chunk).strip()
+                embed_text = (
+                    f"PDF={pdf_path.name} | page={pno} | chunk={ck} | {snippet}"
+                )
+                loc        = (pno << 16) | ck
+                yield embed_text, npath, loc
 
-    texts, paths, rows = [], [], []
-    for txt, path, ridx in tqdm(_iter_rows(), desc="Embedding rows"):
-        texts.append(txt)
-        paths.append(path)
-        rows.append(ridx)
-
+# ─────────────────── build indexes ──────────────────────
+def build_csv_index() -> None:
+    model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+    texts, paths, locs = [], [], []
+    for t, p, l in tqdm(_iter_csv_items(), desc="Embedding CSV rows"):
+        texts.append(t); paths.append(p); locs.append(l)
     if not texts:
-        raise RuntimeError("No CSV rows found under data/")
-
+        raise RuntimeError("No CSV rows to index")
     emb = model.encode(
-        texts,
-        batch_size=64,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
+        texts, batch_size=64, show_progress_bar=True,
+        convert_to_numpy=True, normalize_embeddings=True
     )
+    idx = faiss.IndexFlatIP(emb.shape[1])
+    idx.add(emb)
+    faiss.write_index(idx, str(CSV_INDEX))
+    pd.DataFrame({"path": paths, "loc": locs}).to_parquet(CSV_META)
+    print(f"✅ CSV index saved to {CSV_DIR}")
 
-    index = faiss.IndexFlatIP(emb.shape[1])
-    index.add(emb)
-
-    faiss.write_index(index, str(INDEX_FILE))
-    pd.DataFrame({"csv": paths, "row": rows, "text": texts}).to_parquet(META_FILE)
-    print(f"✅  Saved {index.ntotal} vectors  →  {OUT_DIR}/")
-
-# ─────────────────────────────────── search API ────────────────────────────────────────
-_index = _meta = _embed_model = None
-
-
-def _lazy_load() -> None:
-    global _index, _meta, _embed_model
-    if _index is None:
-        _index       = faiss.read_index(str(INDEX_FILE))
-        _meta        = pd.read_parquet(META_FILE)
-        _embed_model = SentenceTransformer(MODEL_NAME, device="cpu")
-
-
-def _faiss_hits(question: str, pool: int = 200) -> np.ndarray:
-    """Return indices of the top *pool* FAISS vectors for *question*."""
-    _lazy_load()
-    q_emb = _embed_model.encode(
-        [question],
-        convert_to_numpy=True,
-        normalize_embeddings=True,
+def build_pdf_index() -> None:
+    model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+    texts, paths, locs = [], [], []
+    for t, p, l in tqdm(_iter_pdf_items(), desc="Embedding PDF chunks"):
+        texts.append(t); paths.append(p); locs.append(l)
+    if not texts:
+        raise RuntimeError("No PDF chunks to index")
+    emb = model.encode(
+        texts, batch_size=64, show_progress_bar=True,
+        convert_to_numpy=True, normalize_embeddings=True
     )
-    _, I = _index.search(q_emb, pool)
-    return I[0]
+    idx = faiss.IndexFlatIP(emb.shape[1])
+    idx.add(emb)
+    faiss.write_index(idx, str(PDF_INDEX))
+    pd.DataFrame({"path": paths, "loc": locs}).to_parquet(PDF_META)
+    print(f"✅ PDF index saved to {PDF_DIR}")
 
+def build_indexes() -> None:
+    build_csv_index()
+    build_pdf_index()
 
-def search_rows(question: str, csv_path: str | Path, k: int = 8) -> List[int]:
-    """Return *k* best matching row indices inside *csv_path*."""
-    hits: List[int] = []
-    for idx in _faiss_hits(question):
-        if _same_file(_meta.iloc[idx]["csv"], csv_path):
-            hits.append(int(_meta.iloc[idx]["row"]))
-            if len(hits) >= k:
+# ─────────────────── lazy loaders ────────────────────────
+_csv_idx   = _csv_meta   = _csv_embed   = None
+_pdf_idx   = _pdf_meta   = _pdf_embed   = None
+
+def _lazy_csv() -> None:
+    global _csv_idx, _csv_meta, _csv_embed
+    if _csv_idx is not None:
+        return
+    if not CSV_INDEX.exists() or not CSV_META.exists():
+        logger.warning("CSV store missing — rebuilding…")
+        build_csv_index()
+    _csv_idx   = faiss.read_index(str(CSV_INDEX))
+    _csv_meta  = pd.read_parquet(CSV_META)
+    _csv_embed = SentenceTransformer(MODEL_NAME, device=DEVICE)
+
+def _lazy_pdf() -> None:
+    global _pdf_idx, _pdf_meta, _pdf_embed
+    if _pdf_idx is not None:
+        return
+    if not PDF_INDEX.exists() or not PDF_META.exists():
+        logger.warning("PDF store missing — rebuilding…")
+        build_pdf_index()
+    _pdf_idx   = faiss.read_index(str(PDF_INDEX))
+    _pdf_meta  = pd.read_parquet(PDF_META)
+    _pdf_embed = SentenceTransformer(MODEL_NAME, device=DEVICE)
+
+# ─────────────────── search APIs ────────────────────────
+def search_rows(question: str, csv_path: str|Path, k: int=8) -> List[int]:
+    _lazy_csv()
+    aug_q = _augment_question_with_dates(question)
+    qv, _ = _csv_embed.encode(
+        [aug_q], return_numpy=True, normalize_embeddings=True
+    ), None
+    hits  = _csv_idx.search(qv, max(200, k))[1][0]
+
+    results    = []
+    abs_target = (PROJECT_ROOT / csv_path).resolve()
+    for i in hits:
+        if i < 0:
+            break
+        meta_path = (PROJECT_ROOT / _csv_meta.at[i, "path"]).resolve()
+        if meta_path.samefile(abs_target):
+            results.append(int(_csv_meta.at[i, "loc"]))
+            if len(results) >= k:
                 break
-    return hits
-
+    return results
 
 def search_rows_multi(
     question: str,
-    csv_paths: Sequence[str | Path],
-    k: int = 8,
+    csv_paths: Sequence[str|Path],
+    k: int=8
 ) -> Dict[str, List[int]]:
-    """
-    Search *multiple* CSVs at once.
+    _lazy_csv()
+    aug_q    = _augment_question_with_dates(question)
+    qv       = _csv_embed.encode(
+        [aug_q], return_numpy=True, normalize_embeddings=True
+    )
+    hits     = _csv_idx.search(qv, max(200, k))[1][0]
+    abs_csv  = {
+        str(p): (PROJECT_ROOT / Path(p)).resolve()
+        for p in csv_paths
+    }
+    pm, done = {str(p): [] for p in csv_paths}, set()
 
-    Parameters
-    ----------
-    question   : the natural-language query
-    csv_paths  : iterable of paths (relative or absolute)
-    k          : max rows to return *per* file
-
-    Returns
-    -------
-    {str(path): [row_idx, …], …}  (paths use original spelling)
-    """
-    # Prepare bookkeeping
-    path_map: Dict[str, List[int]] = {p: [] for p in csv_paths}
-    done: set[str | Path] = set()
-
-    for idx in _faiss_hits(question):
-        meta_path = _meta.iloc[idx]["csv"]
-        for orig in csv_paths:
-            if orig in done:                       # already satisfied k for that file
-                continue
-            if _same_file(meta_path, orig):
-                path_map[orig].append(int(_meta.iloc[idx]["row"]))
-                if len(path_map[orig]) >= k:
-                    done.add(orig)
-        if len(done) == len(csv_paths):            # all satisfied
+    for i in hits:
+        if i < 0:
+            break
+        meta_path = (PROJECT_ROOT / _csv_meta.at[i, "path"]).resolve()
+        for orig_str, orig_abs in abs_csv.items():
+            if meta_path.samefile(orig_abs) and orig_str not in done:
+                pm[orig_str].append(int(_csv_meta.at[i, "loc"]))
+                if len(pm[orig_str]) >= k:
+                    done.add(orig_str)
+        if len(done) == len(csv_paths):
             break
 
-    return path_map
+    return pm
 
-# ───────────────────────────────────── CLI ─────────────────────────────────────────────
+def search_pdf_chunks(
+    question: str,
+    pdf_path: str|Path,
+    k: int=8
+) -> List[Tuple[int, int]]:
+    _lazy_pdf()
+    qv   = _pdf_embed.encode(
+        [question], return_numpy=True, normalize_embeddings=True
+    )
+    hits = _pdf_idx.search(qv, max(200, k))[1][0]
+
+    results    = []
+    abs_target = (PROJECT_ROOT / pdf_path).resolve()
+    for i in hits:
+        if i < 0:
+            break
+        meta_path = (PROJECT_ROOT / _pdf_meta.at[i, "path"]).resolve()
+        if meta_path.samefile(abs_target):
+            loc = int(_pdf_meta.at[i, "loc"])
+            results.append((loc >> 16, loc & 0xFFFF))
+            if len(results) >= k:
+                break
+    return results
+
+# ─────────────────────── CLI ─────────────────────────────
 if __name__ == "__main__":
-    build_index()
+    build_indexes()

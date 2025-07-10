@@ -61,14 +61,16 @@ regen() {
     echo "🔄  Regenerating …"
     python - <<PY
 import importlib
-mod, fn = "$pycall".rsplit(".",1)
+mod, fn = "$pycall".rsplit(".", 1)
 getattr(importlib.import_module(mod), fn)()
 PY
   else
     echo "⏭️  Skipped"
   fi
 }
+
 regen "Regenerate CSV catalogue?"    "app.services.catalog_generation.csv_cat.save_csv_catalog"
+regen "Regenerate PDF catalogue?"    "app.services.catalog_generation.pdf_cat.save_pdf_catalog"
 regen "Regenerate script catalogue?" "app.services.catalog_generation.script_cat.save_script_catalog"
 
 # 7) Launch FastAPI (no reload; LLM runs in separate process) ---------------------

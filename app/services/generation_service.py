@@ -15,14 +15,17 @@ import model_pb2 as pb
 import model_pb2_grpc as pbr
 
 from app.adapters.csv_adapter   import format_csv_for_prompt
+from app.adapters.pdf_adapter   import format_pdf_for_prompt
 from app.adapters.shell_adapter import format_shell_for_prompt
 
 logger = logging.getLogger("generation_service")
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 ADAPTERS: Dict[str, Callable[..., Any]] = {
-    "csv":   format_csv_for_prompt,    # now signature (question, query)
-    "shell": format_shell_for_prompt,  # signature (query)
+    # key  →    adapter function     expected positional args
+    "csv":   format_csv_for_prompt,   # (question, query)
+    "pdf":   format_pdf_for_prompt,   # (question, query)
+    "shell": format_shell_for_prompt, # (query)
 }
 
 _MODEL_SERVER_URL = os.getenv("MODEL_SERVER_URL", "localhost:50051")
@@ -46,7 +49,7 @@ async def _build_prompt(question: str, queries: List[Dict[str, str]]) -> str:
         if not fmt:
             logger.debug("No adapter for source_type=%r", stype)
             continue
-        if stype == "csv":
+        if stype in ("csv", "pdf"):
             snippet = fmt(question, q)
         else:
             snippet = await fmt(q) if asyncio.iscoroutinefunction(fmt) else fmt(q)

@@ -5,7 +5,7 @@ MODEL_SERVER_URL=localhost:50051
 MAX_NEW_TOKENS=2048
 
 # ── Vector DB / embeddings ────────────────────────────────
-VEC_MODEL_NAME=sentence-transformers/all-mpnet-base-v2
+VEC_MODEL_NAME=Qwen/Qwen3-Embedding-0.6B
 # number of preview rows per query:
 VEC_TOP_K=8
 # guard-rail for very large CSVs (0 = no limit):

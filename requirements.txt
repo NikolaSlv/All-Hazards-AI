@@ -18,6 +18,7 @@ pandas>=2.0.3
 esa>=1.3.0
 redis>=4.5.5
 pyarrow>=15.0.0            # Parquet engine for Pandas
+pypdf>=4.2.0
 
 # ---------- LLM stack ------------------------------------------------------
 transformers==4.53.1
