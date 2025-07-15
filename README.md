@@ -1,4 +1,5 @@
 # All-Hazards-AI 🤖
+
 A **Retrieval-Augmented Generation platform** that lets **any open-source LLM** chat, run user-uploaded Python scripts, and query local CSV and PDF data – backed by a FAISS vector database.
 
 | Layer | Purpose | Key Files |
@@ -13,7 +14,7 @@ A **Retrieval-Augmented Generation platform** that lets **any open-source LLM** 
 
 ---
 
-## 1. Quick start
+## 1. Quick Start
 ⚠️  First run must ALWAYS start with ./start.sh to bootstrap the
     virtual-env, install dependencies, compile protobufs, and build
     the data catalogs.
@@ -49,7 +50,7 @@ Browser ──WS──► FastAPI (dev.sh)
 
 ---
 
-## 3. Data catalogues
+## 3. Data Catalogs
 | Type | Generator | Stored in |
 |------|-----------|-----------|
 | CSV  | `save_csv_catalog()` | `data/catalog.json["files"]` |
@@ -60,7 +61,7 @@ The planner injects these summaries into its prompt so the LLM knows what it can
 
 ---
 
-## 4. Vector search
+## 4. Vector Search
 Run once to (re)build both indexes:
 ```bash
 python vector_index.py    # embeds every CSV & PDF in ./data
@@ -69,7 +70,7 @@ At runtime `vector_retriever.py` embeds the question, fetches top-*k* rows/chunk
 
 ---
 
-## 5. Environment variables
+## 5. Environment Variables
 | Variable | Default | Description |
 |----------|---------|-------------|
 | **── LLM / Logging ──** | | |
@@ -92,7 +93,7 @@ Copy `env_template.txt` → `.env` and tweak as needed.
 
 ---
 
-## 6. Startup scripts
+## 6. Startup Scripts
 | Script | Purpose |
 |--------|---------|
 | `start.sh` | venv + deps, proto build, catalog regen, launch FastAPI |
@@ -101,7 +102,7 @@ Copy `env_template.txt` → `.env` and tweak as needed.
 
 ---
 
-## 7. TODO Roadmap
+## 7. Future Development Roadmap
 * Multi-user auth & isolation
 * Stronger sandbox for user scripts
 * Autoscaling the model-server
