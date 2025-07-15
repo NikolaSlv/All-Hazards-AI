@@ -40,6 +40,7 @@ python-multipart>=0.0.6
 requests>=2.31.0
 tabulate>=0.8.10
 python-dateutil>=2.9.0
+pywin32>=306             # Windows COM support for SimAuto, etc.
 
 # ---------- PyTorch CUDA 12.1 wheels ---------------------------------------
 torch==2.3.0+cu121

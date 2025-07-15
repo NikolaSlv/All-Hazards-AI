@@ -22,10 +22,10 @@ logger = logging.getLogger("generation_service")
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 ADAPTERS: Dict[str, Callable[..., Any]] = {
-    # key  →    adapter function     expected positional args
-    "csv":   format_csv_for_prompt,   # (question, query)
-    "pdf":   format_pdf_for_prompt,   # (question, query)
-    "shell": format_shell_for_prompt, # (query)
+    # key  →   adapter function         expected positional args
+    "csv":     format_csv_for_prompt,   # (question, query)
+    "pdf":     format_pdf_for_prompt,   # (question, query)
+    "script":  format_shell_for_prompt, # (query)
 }
 
 _MODEL_SERVER_URL = os.getenv("MODEL_SERVER_URL", "localhost:50051")
