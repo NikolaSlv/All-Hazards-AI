@@ -102,10 +102,8 @@ Copy `env_template.txt` → `.env` and tweak as needed.
 ---
 
 ## 7. Roadmap
-* Multi-user auth & isolation  
-* Stronger sandbox for user scripts  
-* Autoscaling the model-server  
-* Swap FAISS for pgvector / Qdrant  
-* Streaming Markdown renderer on the UI  
-
----
+* Multi-user auth & isolation
+* Stronger sandbox for user scripts
+* Autoscaling the model-server
+* Swap FAISS for pgvector / Qdrant
+* Streaming Markdown renderer on the UI
