@@ -19,3 +19,7 @@ LLM_LOAD_MODE=4bit
 # ── CSV retrieval limits (used by csv_adapter.py) ─────────
 MAX_CSV_RETR_ROWS=10
 MAX_CSV_RETR_COLS=10
+
+# ── Script-output RAG fallback ────────────────────────────
+MAX_OUTPUT_CHARS=16000
+RAG_TOP_K=8

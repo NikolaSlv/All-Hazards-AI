@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """
 Run an uploaded Python script in this project’s virtual-environment
 and return its stdout.
@@ -14,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
-import sys
+import tempfile
 from pathlib import Path
 from typing import Final
 
@@ -31,29 +32,22 @@ def _find_venv_python(start: Path) -> Path:
         if venv_dir.is_dir():
             # Windows: Scripts\python.exe   • POSIX: bin/python
             sub = "Scripts" if os.name == "nt" else "bin"
-            python_path = venv_dir / sub / ("python.exe" if os.name == "nt" else "python")
+            python_exec = "python.exe" if os.name == "nt" else "python"
+            python_path = venv_dir / sub / python_exec
             if python_path.exists():
                 return python_path
-            # Edge-case: symlinked envs or custom names → fall back to sys.executable
             break
-    raise FileNotFoundError("Could not locate a '.venv' directory "
-                            "above the current file.")
+    raise FileNotFoundError("Could not locate a '.venv' directory above the current file.")
 
 
-# ── Locate the venv interpreter once at import-time ─────────────────────────
 _THIS_FILE: Final = Path(__file__).resolve()
 PYTHON_VENV: Final = _find_venv_python(_THIS_FILE.parent)
 
 
 async def run_shell(file_path: str) -> str:
     """
-    Execute the uploaded script *inside the project's venv* and
-    return **stdout only** as a string.
-
-    Example
-    -------
-    >>> out = await run_shell('/tmp/uploaded/myscript.py')
-    >>> print(out)
+    Execute the uploaded script *inside the project's venv* and return **stdout**.
+    If stdout exceeds MAX_OUTPUT_CHARS, spill to disk, index, and return a marker.
     """
     full_path = Path(file_path).resolve()
     if not full_path.exists():
@@ -69,15 +63,33 @@ async def run_shell(file_path: str) -> str:
             raise RuntimeError(proc.stderr.strip() or "Script exited with non-zero status")
         return proc.stdout
 
-    # Off-load the blocking subprocess to a thread
-    return await asyncio.to_thread(_blocking_exec)
+    output = await asyncio.to_thread(_blocking_exec)
+
+    # If output is too large, spill to disk & index
+    max_chars = int(os.getenv("MAX_OUTPUT_CHARS", "200000"))
+    if len(output) > max_chars:
+        out_dir = Path(__file__).parents[2] / "user_data" / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        tmp_file = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt", dir=out_dir)
+        tmp_file.write(output)
+        tmp_file.close()
+        tmp_path = tmp_file.name
+
+        # index this spill just like PDFs
+        from app.services.vector_index import build_script_output_index
+        build_script_output_index(tmp_path)
+
+        # return marker instead of the full dump
+        return f"__INDEXED_OUTPUT__:{tmp_path}"
+
+    return output
 
 
-# ── Quick manual test (run this file directly) ─────────────────────────────−
 if __name__ == "__main__":
+    import asyncio as _asyncio
+
     async def _demo() -> None:
-        # Replace with an actual test script path
         test_py = Path.cwd() / "hello.py"
         print(await run_shell(str(test_py)))
 
-    asyncio.run(_demo())
+    _asyncio.run(_demo())
